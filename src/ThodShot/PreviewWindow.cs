@@ -186,7 +186,7 @@ namespace ThodShot
 
         double fitScale = 1, scale = 1;
         string savedPath;
-        bool firstFrameFitted;
+        bool initialFitScheduled;
         bool ocrBusy, ocrDone;
         int anchor = -1;
         bool dragWords, dragMarquee, panning, freehandDrawing, rectangleDrawing;
@@ -370,7 +370,8 @@ namespace ThodShot
                 UpdateScale();
                 ResetFit();
                 // Loaded может сработать до того, как WPF задаст окончательный размер
-                // рабочей области. Пересчитываем после простоя очереди раскладки.
+                // рабочей области. Этот расчёт нужен для первого кадра; окончательный
+                // выполняется после его отрисовки ниже.
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     UpdateScale();
@@ -378,14 +379,18 @@ namespace ThodShot
                 }), DispatcherPriority.ContextIdle);
             };
             // На части DPI-конфигураций первый реальный кадр приходит уже после
-            // ContextIdle. Это последнее безопасное место, где размер viewport
-            // окончательный; повторно не сбрасываем выбранный пользователем масштаб.
+            // ContextIdle. Откладываем подгонку ещё на один idle-цикл после рендера:
+            // к этому моменту viewport уже имеет фактический размер окна. Выполняем
+            // один раз, чтобы не сбрасывать выбранный пользователем масштаб дальше.
             ContentRendered += (s, e) =>
             {
-                if (firstFrameFitted) return;
-                UpdateScale();
-                ResetFit();
-                firstFrameFitted = true;
+                if (initialFitScheduled) return;
+                initialFitScheduled = true;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    UpdateScale();
+                    ResetFit();
+                }), DispatcherPriority.ApplicationIdle);
             };
             DpiChanged += (s, e) => { UpdateScale(); ResetFit(); };
 
