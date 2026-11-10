@@ -30,6 +30,12 @@ namespace ThodShot
                     g.ReleaseHdc(dest);
                 }
             }
+
+            // BitBlt не видит аппаратно ускоренные окна (VMware и т. п.).
+            // Дорисовываем мониторы через Windows Graphics Capture, если он доступен.
+            try { WgcCapture.OverlayMonitors(bmp, bounds); }
+            catch (Exception ex) { Log.Write("WGC fallback: " + ex.Message); }
+
             return bmp;
         }
     }
@@ -275,7 +281,7 @@ namespace ThodShot
 
             using (var f = new Font("Segoe UI", 12f * sc, FontStyle.Regular, GraphicsUnit.Pixel))
             {
-                string hint = "Esc — отмена   ·   Enter или пробел — весь экран";
+                string hint = "Esc или правая кнопка — отмена   ·   Enter — весь экран";
                 SizeF sz = g.MeasureString(hint, f);
                 int x = bar.X + (bar.Width - (int)sz.Width) / 2, y = bar.Bottom + (int)(8 * sc);
                 var r = new Rectangle(x - (int)(10 * sc), y - (int)(3 * sc), (int)sz.Width + (int)(20 * sc), (int)sz.Height + (int)(6 * sc));
@@ -340,6 +346,7 @@ namespace ThodShot
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Right) { Cancel(); return; }
             if (e.Button != MouseButtons.Left) return;
             int hb = HitButton(e.Location);
             if (hb == 0) { mode = "region"; sel = Rectangle.Empty; Invalidate(); return; }

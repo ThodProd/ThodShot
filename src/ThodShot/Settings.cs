@@ -63,6 +63,9 @@ namespace ThodShot
         public string Format { get; set; } = "png";           // png | jpg
         public string OcrLanguage { get; set; } = "auto";     // auto | ru | en
 
+        // версия применённых миграций настроек
+        public int SetupVersion { get; set; }
+
         // исходное значение системной настройки PrintScreen -> Snipping Tool
         public bool PrtScRecorded { get; set; }
         public int? PrtScOriginal { get; set; }
@@ -86,11 +89,28 @@ namespace ThodShot
                 if (File.Exists(Paths.SettingsFile))
                 {
                     var s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(Paths.SettingsFile, Encoding.UTF8));
-                    if (s != null) return s;
+                    if (s != null)
+                    {
+                        s.Migrate();
+                        return s;
+                    }
                 }
             }
             catch (Exception ex) { Log.Write("Ошибка чтения настроек: " + ex.Message); }
             return new AppSettings();
+        }
+
+        /// <summary>Разовые миграции настроек между версиями.</summary>
+        void Migrate()
+        {
+            if (SetupVersion < 1)
+            {
+                // в 1.1 областью по умолчанию стала область, а не весь экран
+                if (DefaultMode != "region" && DefaultMode != "full") DefaultMode = "region";
+                else if (DefaultMode == "full") DefaultMode = "region";
+                SetupVersion = 1;
+                Save();
+            }
         }
 
         public void Save()

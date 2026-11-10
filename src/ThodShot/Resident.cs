@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Threading;
@@ -54,6 +55,9 @@ namespace ThodShot
 
             hook = new KeyboardHook(() => Dispatch(StartCapture));
             ApplyHook();
+
+            // прогреваем захват, чтобы PrintScreen срабатывал без задержки
+            Task.Run(() => WgcCapture.Warmup());
 
             RegisterEvent(0, Ipc.CaptureEvt, StartCapture);
             RegisterEvent(1, Ipc.SettingsEvt, ShowSettings);
@@ -128,9 +132,34 @@ namespace ThodShot
             try
             {
                 if (preview != null) { preview.Close(); preview = null; }
+            }
+            catch { }
 
-                System.Drawing.Rectangle bounds;
-                Bitmap shot = ScreenGrab.CaptureVirtualScreen(out bounds);
+            // Захват (особенно WGC) не должен подвешивать окно и хуки — делаем его в фоне.
+            Task.Run(() =>
+            {
+                try
+                {
+                    Rectangle bounds;
+                    Bitmap shot = ScreenGrab.CaptureVirtualScreen(out bounds);
+                    Dispatch(() => BeginOverlay(shot, bounds));
+                }
+                catch (Exception ex)
+                {
+                    Log.Write("Ошибка съёмки: " + ex);
+                    Dispatch(() =>
+                    {
+                        capturing = false;
+                        ShowCaptureError(ex);
+                    });
+                }
+            });
+        }
+
+        void BeginOverlay(Bitmap shot, Rectangle bounds)
+        {
+            try
+            {
                 overlay = new CaptureOverlay(shot, bounds, AppSettings.Current.DefaultMode);
                 overlay.Completed += bmp =>
                 {
@@ -147,16 +176,22 @@ namespace ThodShot
             }
             catch (Exception ex)
             {
+                try { shot.Dispose(); } catch { }
                 capturing = false;
                 overlay = null;
-                Log.Write("Ошибка съёмки: " + ex);
-                try
-                {
-                    System.Windows.Forms.MessageBox.Show("Не удалось сделать снимок: " + ex.Message,
-                        "ThodShot", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
-                }
-                catch { }
+                Log.Write("Ошибка оверлея: " + ex);
+                ShowCaptureError(ex);
             }
+        }
+
+        static void ShowCaptureError(Exception ex)
+        {
+            try
+            {
+                System.Windows.Forms.MessageBox.Show("Не удалось сделать снимок: " + ex.Message,
+                    "ThodShot", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+            }
+            catch { }
         }
 
         void ShowPreview(Bitmap bmp)
@@ -167,6 +202,9 @@ namespace ThodShot
                 var created = preview;
                 preview.Closed += (s, e) => { if (ReferenceEquals(preview, created)) preview = null; };
                 preview.Show();
+                // вывести окно поверх остальных, даже если система не отдаёт фокус
+                preview.Topmost = true;
+                preview.Topmost = false;
                 preview.Activate();
                 Native.ForceForeground(new WindowInteropHelper(preview).Handle);
             }
