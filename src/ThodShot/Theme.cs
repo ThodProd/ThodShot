@@ -15,16 +15,27 @@ namespace ThodShot
 
         static Theme()
         {
-            bool dark = false;
+            string mode = "dark";
             try
             {
-                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
-                {
-                    object v = k != null ? k.GetValue("AppsUseLightTheme") : null;
-                    if (v is int) dark = (int)v == 0;
-                }
+                if (AppSettings.Current != null && !string.IsNullOrWhiteSpace(AppSettings.Current.Theme))
+                    mode = AppSettings.Current.Theme;
             }
             catch { }
+
+            bool dark = mode == "dark";
+            if (mode != "dark" && mode != "light")
+            {
+                try
+                {
+                    using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                    {
+                        object v = k != null ? k.GetValue("AppsUseLightTheme") : null;
+                        if (v is int) dark = (int)v == 0;
+                    }
+                }
+                catch { }
+            }
             Dark = dark;
             if (dark)
             {

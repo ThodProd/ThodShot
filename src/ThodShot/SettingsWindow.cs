@@ -53,6 +53,15 @@ namespace ThodShot
             panel.Children.Add(ToggleRow("После сохранения открыть папку", null,
                 () => AppSettings.Current.OpenFolderAfterSave, v => AppSettings.Current.OpenFolderAfterSave = v));
 
+            // Оформление
+            panel.Children.Add(Section("Оформление"));
+            panel.Children.Add(ChoiceRow("Тема", new[] { "Тёмная", "Светлая", "Системная" }, new[] { "dark", "light", "system" },
+                () => AppSettings.Current.Theme, v => AppSettings.Current.Theme = v));
+            var restart = Btn("Перезапустить программу", 0, RestartApp);
+            restart.Margin = new Thickness(0, 4, 0, 4);
+            panel.Children.Add(restart);
+            panel.Children.Add(Muted("Новая тема применится после перезапуска."));
+
             // Съёмка
             panel.Children.Add(Section("Съёмка"));
             panel.Children.Add(ChoiceRow("Режим по умолчанию", new[] { "Область", "Весь экран" }, new[] { "region", "full" },
@@ -96,6 +105,25 @@ namespace ThodShot
                     folderText.Text = d.SelectedPath;
                     Changed();
                 }
+            }
+        }
+
+        void RestartApp()
+        {
+            try
+            {
+                var s = AppSettings.Current;
+                Integration.Apply(s);
+                Process.Start(new ProcessStartInfo(Environment.ProcessPath, "--restart")
+                {
+                    UseShellExecute = false,
+                    WorkingDirectory = Path.GetDirectoryName(Environment.ProcessPath)
+                });
+                Ipc.Signal(Ipc.ExitEvt);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("Перезапуск: " + ex.Message);
             }
         }
 

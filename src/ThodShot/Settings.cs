@@ -58,6 +58,7 @@ namespace ThodShot
         public bool Autostart { get; set; } = true;
         public bool InterceptPrintScreen { get; set; } = true;
         public string DefaultMode { get; set; } = "region";   // region | full
+        public string Theme { get; set; } = "dark";           // dark | light | system
         public bool OpenFolderAfterSave { get; set; } = true;
         public string Format { get; set; } = "png";           // png | jpg
         public string OcrLanguage { get; set; } = "auto";     // auto | ru | en

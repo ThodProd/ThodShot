@@ -27,6 +27,13 @@ namespace ThodShot
                         return Integration.Cleanup();
                     case "--stop-background":
                         return Ipc.StopRunning(15000) ? 0 : 1;
+                    case "--restart":
+                        {
+                            // дождаться выхода текущего экземпляра и открыть настройки заново
+                            for (int i = 0; i < 150 && Ipc.IsRunning(); i++) Thread.Sleep(100);
+                            StartProcess("--settings");
+                            return 0;
+                        }
                     case "--enable-printscreen":
                     case "--disable-printscreen":
                         {
@@ -62,16 +69,21 @@ namespace ThodShot
 
         private static void StartBackground()
         {
+            StartProcess("--background");
+        }
+
+        private static void StartProcess(string arguments)
+        {
             try
             {
-                var psi = new ProcessStartInfo(Environment.ProcessPath, "--background")
+                var psi = new ProcessStartInfo(Environment.ProcessPath, arguments)
                 {
                     UseShellExecute = false,
                     WorkingDirectory = Path.GetDirectoryName(Environment.ProcessPath)
                 };
                 Process.Start(psi);
             }
-            catch (Exception ex) { Log.Write("Не удалось запустить фоновый процесс: " + ex.Message); }
+            catch (Exception ex) { Log.Write("Не удалось запустить процесс: " + ex.Message); }
         }
     }
 }

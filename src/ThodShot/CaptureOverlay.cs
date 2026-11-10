@@ -42,6 +42,7 @@ namespace ThodShot
 
         readonly Bitmap shot;
         readonly Bitmap dimmed;
+        readonly Bitmap vignette;
         readonly Rectangle vb;
         readonly float sc;
         readonly Rectangle[] btn = new Rectangle[3];
@@ -78,10 +79,34 @@ namespace ThodShot
             using (var g = Graphics.FromImage(dimmed))
             {
                 g.DrawImage(shot, new Rectangle(0, 0, w, h), 0, 0, w, h, GraphicsUnit.Pixel);
-                using (var br = new SolidBrush(Color.FromArgb(120, 0, 0, 0))) g.FillRectangle(br, 0, 0, w, h);
+                using (var br = new SolidBrush(Color.FromArgb(96, 0, 0, 0))) g.FillRectangle(br, 0, 0, w, h);
             }
+            vignette = BuildVignette(w, h);
             LayoutToolbar();
             if (mode == "full") sel = MonitorRect(PointToClientSafe(Cursor.Position));
+        }
+
+        /// <summary>Тёмная дымка, усиливающаяся к краям экрана.</summary>
+        static Bitmap BuildVignette(int w, int h)
+        {
+            var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            int band = Math.Max(120, Math.Min(w, h) / 4);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                using (var b = new LinearGradientBrush(new Rectangle(0, 0, w, band),
+                    Color.FromArgb(112, 0, 0, 0), Color.FromArgb(0, 0, 0, 0), LinearGradientMode.Vertical))
+                { b.WrapMode = WrapMode.TileFlipXY; g.FillRectangle(b, 0, 0, w, band); }
+                using (var b = new LinearGradientBrush(new Rectangle(0, h - band, w, band),
+                    Color.FromArgb(0, 0, 0, 0), Color.FromArgb(135, 0, 0, 0), LinearGradientMode.Vertical))
+                { b.WrapMode = WrapMode.TileFlipXY; g.FillRectangle(b, 0, h - band, w, band); }
+                using (var b = new LinearGradientBrush(new Rectangle(0, 0, band, h),
+                    Color.FromArgb(102, 0, 0, 0), Color.FromArgb(0, 0, 0, 0), LinearGradientMode.Horizontal))
+                { b.WrapMode = WrapMode.TileFlipXY; g.FillRectangle(b, 0, 0, band, h); }
+                using (var b = new LinearGradientBrush(new Rectangle(w - band, 0, band, h),
+                    Color.FromArgb(0, 0, 0, 0), Color.FromArgb(122, 0, 0, 0), LinearGradientMode.Horizontal))
+                { b.WrapMode = WrapMode.TileFlipXY; g.FillRectangle(b, w - band, 0, band, h); }
+            }
+            return bmp;
         }
 
         protected override CreateParams CreateParams
@@ -146,15 +171,58 @@ namespace ThodShot
             var g = e.Graphics;
             int w = shot.Width, h = shot.Height;
             g.DrawImage(dimmed, new Rectangle(0, 0, w, h), 0, 0, w, h, GraphicsUnit.Pixel);
+            g.DrawImage(vignette, new Rectangle(0, 0, w, h), 0, 0, w, h, GraphicsUnit.Pixel);
 
             if (sel.Width > 0 && sel.Height > 0)
             {
+                DrawSelectionShadow(g, sel);
                 g.DrawImage(shot, sel, sel.X, sel.Y, sel.Width, sel.Height, GraphicsUnit.Pixel);
-                using (var pen = new Pen(Color.FromArgb(54, 118, 232), Math.Max(2f, sc * 1.5f)))
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var pen = new Pen(Color.FromArgb(54, 118, 232), Math.Max(2f, sc * 1.6f)))
                     g.DrawRectangle(pen, sel.X, sel.Y, sel.Width - 1, sel.Height - 1);
-                if (mode == "region") DrawSizeLabel(g);
+                using (var pen = new Pen(Color.FromArgb(110, 255, 255, 255), 1f))
+                    g.DrawRectangle(pen, sel.X + 1, sel.Y + 1, sel.Width - 3, sel.Height - 3);
+                if (mode == "region")
+                {
+                    DrawHandles(g);
+                    DrawSizeLabel(g);
+                }
+                g.SmoothingMode = SmoothingMode.Default;
             }
             DrawToolbar(g);
+        }
+
+        void DrawSelectionShadow(Graphics g, Rectangle r)
+        {
+            for (int i = 9; i >= 1; i--)
+            {
+                int d = (int)(i * 2.4f * sc);
+                using (var pen = new Pen(Color.FromArgb(7, 0, 0, 0), d))
+                    g.DrawRectangle(pen, r.X - d, r.Y - d, r.Width + d * 2, r.Height + d * 2);
+            }
+        }
+
+        void DrawHandles(Graphics g)
+        {
+            if (sel.Width < 24 || sel.Height < 24) return;
+            int hs = Math.Max(6, (int)(7 * sc));
+            var pts = new[]
+            {
+                new Point(sel.Left, sel.Top),
+                new Point(sel.Right - 1, sel.Top),
+                new Point(sel.Left, sel.Bottom - 1),
+                new Point(sel.Right - 1, sel.Bottom - 1)
+            };
+            using (var fill = new SolidBrush(Color.FromArgb(54, 118, 232)))
+            using (var pen = new Pen(Color.White, Math.Max(1f, sc)))
+            {
+                foreach (var p in pts)
+                {
+                    var r = new Rectangle(p.X - hs / 2, p.Y - hs / 2, hs, hs);
+                    g.FillRectangle(fill, r);
+                    g.DrawRectangle(pen, r);
+                }
+            }
         }
 
         void DrawSizeLabel(Graphics g)
@@ -163,12 +231,21 @@ namespace ThodShot
             using (var f = new Font("Segoe UI", 9f * sc, FontStyle.Regular, GraphicsUnit.Pixel))
             {
                 SizeF sz = g.MeasureString(text, f);
-                int pad = (int)(4 * sc);
-                int x = sel.X, y = sel.Y - (int)sz.Height - pad * 2 - 4;
-                if (y < 0) y = sel.Y + 4;
-                var r = new Rectangle(x, y, (int)sz.Width + pad * 2, (int)sz.Height + pad);
-                using (var br = new SolidBrush(Color.FromArgb(220, 28, 29, 32))) g.FillRectangle(br, r);
-                g.DrawString(text, f, Brushes.White, x + pad, y + pad / 2);
+                int pad = (int)(5 * sc);
+                int labelW = (int)sz.Width + pad * 2 + (int)(2 * sc);
+                int labelH = (int)sz.Height + pad;
+                int x = sel.X, y = sel.Y - labelH - (int)(6 * sc);
+                if (y < 0) y = Math.Min(shot.Height - labelH - 2, sel.Y + (int)(6 * sc));
+                if (x + labelW > shot.Width) x = Math.Max(0, shot.Width - labelW);
+                var r = new Rectangle(x, y, labelW, labelH);
+                using (var path = Round(r, (int)(6 * sc)))
+                using (var br = new SolidBrush(Color.FromArgb(235, 24, 25, 28)))
+                using (var pen = new Pen(Color.FromArgb(60, 255, 255, 255), 1f))
+                {
+                    g.FillPath(br, path);
+                    g.DrawPath(pen, path);
+                }
+                g.DrawString(text, f, Brushes.White, x + pad + (int)sc, y + pad / 2);
             }
         }
 
@@ -329,6 +406,7 @@ namespace ThodShot
             base.OnFormClosed(e);
             shot.Dispose();
             dimmed.Dispose();
+            vignette.Dispose();
             if (!delivered)
             {
                 var handler = Cancelled;
