@@ -51,6 +51,29 @@ namespace ThodShot
             TitleText.Foreground = Theme.Muted;
             header.Children.Add(TitleText);
 
+            var maximize = new Button
+            {
+                Content = new System.Windows.Shapes.Path
+                {
+                    Data = Geometry.Parse("M 2,2 L 14,2 L 14,14 L 2,14 Z"),
+                    Stroke = Theme.Text,
+                    StrokeThickness = 1.4,
+                    Width = 14,
+                    Height = 14,
+                    Stretch = Stretch.Uniform
+                },
+                Style = Styles.Button(2),
+                Width = 40,
+                Height = 32,
+                Padding = new Thickness(0),
+                Margin = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                ToolTip = "На весь экран"
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(maximize, true);
+            maximize.Click += (s, e) => ToggleMaximize();
+
             var close = new Button
             {
                 Content = new System.Windows.Shapes.Path
@@ -65,13 +88,35 @@ namespace ThodShot
                 Width = 40,
                 Height = 32,
                 Padding = new Thickness(0),
-                Margin = new Thickness(0, 0, 4, 0),
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center
+                Margin = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
             };
             WindowChrome.SetIsHitTestVisibleInChrome(close, true);
             close.Click += (s, e) => Close();
-            header.Children.Add(close);
+
+            var windowButtons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 4, 0)
+            };
+            windowButtons.Children.Add(maximize);
+            windowButtons.Children.Add(close);
+            header.Children.Add(windowButtons);
+
+            StateChanged += (s, e) =>
+            {
+                var path = maximize.Content as System.Windows.Shapes.Path;
+                if (path != null)
+                {
+                    path.Data = Geometry.Parse(WindowState == WindowState.Maximized
+                        ? "M 4,1 L 15,1 L 15,12 M 1,4 L 12,4 L 12,15 L 1,15 Z"
+                        : "M 2,2 L 14,2 L 14,14 L 2,14 Z");
+                }
+                maximize.ToolTip = WindowState == WindowState.Maximized ? "Восстановить" : "На весь экран";
+            };
 
             Grid.SetRow(header, 0);
             Grid.SetRow(Body, 1);
@@ -91,6 +136,11 @@ namespace ThodShot
             {
                 if (e.Key == Key.Escape) { e.Handled = true; Close(); }
             };
+        }
+
+        void ToggleMaximize()
+        {
+            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
         }
 
         IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
