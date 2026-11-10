@@ -1,6 +1,9 @@
+using System;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shell;
 
@@ -9,6 +12,9 @@ namespace ThodShot
     /// <summary>Окно без системной рамки: тонкая шапка, один крестик, Esc закрывает.</summary>
     internal abstract class ThemedWindow : Window
     {
+        const int WM_GETMINMAXINFO = 0x0024;
+        const uint MONITOR_DEFAULTTONEAREST = 2;
+
         protected readonly Grid Body = new Grid();
         protected readonly TextBlock TitleText = new TextBlock();
 
@@ -74,10 +80,36 @@ namespace ThodShot
             outer.Child = grid;
             Content = outer;
 
+            // Без этого окно без системной рамки при развороте уходит под панель задач.
+            SourceInitialized += (s, e) =>
+            {
+                var source = (HwndSource)PresentationSource.FromVisual(this);
+                if (source != null) source.AddHook(WindowProc);
+            };
+
             PreviewKeyDown += (s, e) =>
             {
                 if (e.Key == Key.Escape) { e.Handled = true; Close(); }
             };
+        }
+
+        IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == WM_GETMINMAXINFO && lParam != IntPtr.Zero)
+            {
+                var info = (Native.MINMAXINFO)Marshal.PtrToStructure(lParam, typeof(Native.MINMAXINFO));
+                IntPtr monitor = Native.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                var mi = new Native.MONITORINFO { cbSize = Marshal.SizeOf(typeof(Native.MONITORINFO)) };
+                if (monitor != IntPtr.Zero && Native.GetMonitorInfo(monitor, ref mi))
+                {
+                    info.ptMaxPosition.X = mi.rcWork.Left - mi.rcMonitor.Left;
+                    info.ptMaxPosition.Y = mi.rcWork.Top - mi.rcMonitor.Top;
+                    info.ptMaxSize.X = mi.rcWork.Right - mi.rcWork.Left;
+                    info.ptMaxSize.Y = mi.rcWork.Bottom - mi.rcWork.Top;
+                    Marshal.StructureToPtr(info, lParam, true);
+                }
+            }
+            return IntPtr.Zero;
         }
     }
 }

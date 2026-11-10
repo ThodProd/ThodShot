@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -16,24 +17,31 @@ using System.Windows.Shapes;
 
 namespace ThodShot
 {
-    internal enum PreviewTool { Cursor, Arrow, Diamond, Marker }
+    internal enum PreviewTool { Cursor, Arrow, Diamond, Highlighter, Pen }
 
     /// <summary>Пометка на снимке. Координаты — в пикселях исходного изображения.</summary>
     internal abstract class Annotation
     {
+        public Color Ink = Color.FromRgb(0xF2, 0x3B, 0x30);
+
         public abstract void Draw(DrawingContext dc);
+
+        protected static Brush MakeBrush(Color color, byte alpha = 255)
+        {
+            var b = new SolidColorBrush(Color.FromArgb(alpha, color.R, color.G, color.B));
+            b.Freeze();
+            return b;
+        }
     }
 
     internal abstract class TwoPointAnnotation : Annotation
     {
         public Point Start, End;
+        public double Thickness;
     }
 
     internal sealed class ArrowAnnotation : TwoPointAnnotation
     {
-        static readonly Brush Red = Theme.Make("#F23B30");
-
-        public double Thickness;
         public double Head;
 
         public override void Draw(DrawingContext dc)
@@ -45,7 +53,8 @@ namespace ThodShot
             double ux = dx / len, uy = dy / len;
             double head = Math.Min(Head, len * 0.62);
             double bx = End.X - ux * head, by = End.Y - uy * head;
-            var pen = new Pen(Red, Thickness)
+            var stroke = MakeBrush(Ink);
+            var pen = new Pen(stroke, Thickness)
             {
                 StartLineCap = PenLineCap.Round,
                 EndLineCap = PenLineCap.Round
@@ -61,17 +70,12 @@ namespace ThodShot
                 c.LineTo(new Point(bx - px * hw, by - py * hw), true, false);
             }
             geo.Freeze();
-            dc.DrawGeometry(Red, null, geo);
+            dc.DrawGeometry(stroke, null, geo);
         }
     }
 
     internal sealed class DiamondAnnotation : TwoPointAnnotation
     {
-        static readonly Brush Red = Theme.Make("#F23B30");
-        static readonly Brush Fill = Theme.Make("#33F23B30");
-
-        public double Thickness;
-
         public override void Draw(DrawingContext dc)
         {
             double l = Math.Min(Start.X, End.X), t = Math.Min(Start.Y, End.Y);
@@ -87,32 +91,34 @@ namespace ThodShot
                 c.LineTo(new Point(l, cy), true, false);
             }
             geo.Freeze();
-            var pen = new Pen(Red, Thickness)
+            var stroke = MakeBrush(Ink);
+            var pen = new Pen(stroke, Thickness)
             {
                 LineJoin = PenLineJoin.Round,
                 StartLineCap = PenLineCap.Round,
                 EndLineCap = PenLineCap.Round
             };
-            dc.DrawGeometry(Fill, pen, geo);
+            dc.DrawGeometry(MakeBrush(Ink, 0x33), pen, geo);
         }
     }
 
-    internal sealed class MarkerAnnotation : Annotation
+    internal abstract class FreehandAnnotation : Annotation
     {
-        static readonly Brush Highlight = Theme.Make("#78FFD54A");
-
         public readonly List<Point> Points = new List<Point>();
         public double Thickness;
+
+        protected abstract byte Alpha { get; }
 
         public override void Draw(DrawingContext dc)
         {
             if (Points.Count == 0) return;
+            var brush = MakeBrush(Ink, Alpha);
             if (Points.Count == 1)
             {
-                dc.DrawEllipse(Highlight, null, Points[0], Thickness / 2, Thickness / 2);
+                dc.DrawEllipse(brush, null, Points[0], Thickness / 2, Thickness / 2);
                 return;
             }
-            var pen = new Pen(Highlight, Thickness)
+            var pen = new Pen(brush, Thickness)
             {
                 StartLineCap = PenLineCap.Round,
                 EndLineCap = PenLineCap.Round,
@@ -127,6 +133,16 @@ namespace ThodShot
             geo.Freeze();
             dc.DrawGeometry(null, pen, geo);
         }
+    }
+
+    internal sealed class HighlighterAnnotation : FreehandAnnotation
+    {
+        protected override byte Alpha { get { return 0x78; } }
+    }
+
+    internal sealed class PenAnnotation : FreehandAnnotation
+    {
+        protected override byte Alpha { get { return 255; } }
     }
 
     internal sealed class AnnotationCanvas : FrameworkElement
@@ -184,13 +200,17 @@ namespace ThodShot
         string savedPath;
         bool ocrBusy, ocrDone;
         int anchor = -1;
-        bool dragWords, dragMarquee, panning, markerDrawing;
+        bool dragWords, dragMarquee, panning, freehandDrawing;
         Point marqueeStart, panStart;
         double panX0, panY0;
         PreviewTool tool = PreviewTool.Cursor;
         TwoPointAnnotation pending;
-        MarkerAnnotation marker;
-        Button btnUndo;
+        FreehandAnnotation freehand;
+        Button btnUndo, colorButton;
+        Slider widthSlider;
+        Popup palette;
+        Color ink = Color.FromRgb(0xF2, 0x3B, 0x30);
+        double lineWidth = 6;
         bool suppressMenu;
 
         public PreviewWindow(System.Drawing.Bitmap bmp) : base("Скриншот")
@@ -316,9 +336,9 @@ namespace ThodShot
             actions.Children.Add(btnOcr);
 
             var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            btnCopy = MakeButton("Копировать", 0, CopyImageWithStatus);
+            btnCopy = MakeButton("Копировать", 0, () => CopyImageWithStatus(true));
             btnCopy.ToolTip = "Скопировать изображение с пометками (Ctrl+C)";
-            btnSave = MakeButton("Сохранить", 1, DoSave);
+            btnSave = MakeButton("Сохранить", 1, () => DoSave(true));
             btnSave.ToolTip = "Сохранить с пометками (Ctrl+S)";
             btnGear = MakeButton("\uE713", 2, () => { if (Resident.Instance != null) Resident.Instance.ShowSettings(); });
             btnGear.FontFamily = new FontFamily("Segoe MDL2 Assets");
@@ -375,25 +395,84 @@ namespace ThodShot
                 Margin = new Thickness(0, 10, 0, 0)
             };
             Panel.SetZIndex(card, 10);
-            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
             row.Children.Add(MakeToolButton(PreviewTool.Cursor, "Курсор и сдвиг",
                 Geometry.Parse("M 4,3 L 4,19 L 8.8,14.3 L 11.7,20 L 14.6,18.6 L 11.7,13 L 17.5,13 Z"), true));
-            row.Children.Add(MakeToolButton(PreviewTool.Arrow, "Красная стрелка",
+            row.Children.Add(MakeToolButton(PreviewTool.Arrow, "Стрелка",
                 Geometry.Parse("M 3,17 L 16.5,3.5 M 8.5,3.5 L 16.5,3.5 L 16.5,11.5"), false));
             row.Children.Add(MakeToolButton(PreviewTool.Diamond, "Ромб",
                 Geometry.Parse("M 10,2.5 L 17.5,10 L 10,17.5 L 2.5,10 Z"), false));
-            row.Children.Add(MakeToolButton(PreviewTool.Marker, "Маркер",
+            row.Children.Add(MakeToolButton(PreviewTool.Highlighter, "Выделитель",
+                Geometry.Parse("M 3,14 L 12,5 L 16,9 L 7,18 Z M 13,4 L 15.5,1.5 L 18.5,4.5 L 16,7"), false));
+            row.Children.Add(MakeToolButton(PreviewTool.Pen, "Маркер",
                 Geometry.Parse("M 4,15.5 L 12.8,6.7 L 15.3,9.2 L 6.5,18 L 3,19 Z M 13.7,5.8 L 15.2,4.3 L 17.7,6.8 L 16.2,8.3"), false));
 
-            row.Children.Add(new Border
+            row.Children.Add(MakeSeparator());
+
+            widthSlider = new Slider
             {
-                Width = 1,
-                Height = 20,
-                Background = Theme.Line,
-                Margin = new Thickness(5, 0, 5, 0),
+                Width = 78,
+                Minimum = 2,
+                Maximum = 20,
+                Value = lineWidth,
+                IsSnapToTickEnabled = true,
+                TickFrequency = 1,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 2, 0),
+                ToolTip = "Толщина"
+            };
+            row.Children.Add(widthSlider);
+            var widthValue = new TextBlock
+            {
+                Text = ((int)lineWidth).ToString(),
+                Width = 16,
+                FontSize = 11,
+                Foreground = Theme.Muted,
+                TextAlignment = TextAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
-            });
+            };
+            row.Children.Add(widthValue);
+            widthSlider.ValueChanged += (s, e) =>
+            {
+                lineWidth = Math.Round(widthSlider.Value);
+                widthValue.Text = ((int)lineWidth).ToString();
+                if (pending != null)
+                {
+                    pending.Thickness = lineWidth;
+                    var arrow = pending as ArrowAnnotation;
+                    if (arrow != null) arrow.Head = Math.Max(14, lineWidth * 4);
+                    annLayer.Refresh();
+                }
+            };
+
+            colorButton = new Button
+            {
+                Width = 30,
+                Height = 30,
+                Style = Styles.Button(2),
+                Padding = new Thickness(0),
+                Margin = new Thickness(3, 0, 1, 0),
+                Background = Brushes.Transparent,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                ToolTip = "Цвет"
+            };
+            var dot = new Ellipse
+            {
+                Width = 15,
+                Height = 15,
+                Fill = new SolidColorBrush(ink),
+                Stroke = Theme.Line,
+                StrokeThickness = 1
+            };
+            colorButton.Content = dot;
+            colorButton.Click += (s, e) => { palette.IsOpen = !palette.IsOpen; };
+            row.Children.Add(colorButton);
+
+            palette = BuildPalette();
+
+            row.Children.Add(MakeSeparator());
 
             btnUndo = MakeIconButton("M 8,5 L 3.5,9.5 L 8,14 M 3.5,9.5 L 12,9.5 A 4.6,4.6 0 0 1 12,18.7 L 8.5,18.7",
                 "Отменить (Ctrl+Z)", Undo);
@@ -402,6 +481,92 @@ namespace ThodShot
 
             card.Child = row;
             return card;
+        }
+
+        static Border MakeSeparator()
+        {
+            return new Border
+            {
+                Width = 1,
+                Height = 20,
+                Background = Theme.Line,
+                Margin = new Thickness(5, 0, 5, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+
+        Popup BuildPalette()
+        {
+            var wrap = new WrapPanel { Width = 4 * 32 };
+            var colors = new[]
+            {
+                Color.FromRgb(0xF2, 0x3B, 0x30), // красный
+                Color.FromRgb(0xFF, 0x8A, 0x1F), // оранжевый
+                Color.FromRgb(0xFF, 0xC4, 0x00), // жёлтый
+                Color.FromRgb(0x27, 0xC4, 0x6B), // зелёный
+                Color.FromRgb(0x36, 0x76, 0xE8), // синий
+                Color.FromRgb(0x9B, 0x5C, 0xFF), // фиолетовый
+                Color.FromRgb(0xFF, 0xFF, 0xFF), // белый
+                Color.FromRgb(0x22, 0x24, 0x28)  // чёрный
+            };
+            foreach (var c in colors)
+            {
+                var swatch = new Button
+                {
+                    Width = 28,
+                    Height = 28,
+                    Margin = new Thickness(3),
+                    Padding = new Thickness(0),
+                    Style = Styles.Button(2),
+                    Background = new SolidColorBrush(c),
+                    BorderBrush = c == ink ? Theme.Text : Theme.Line,
+                    BorderThickness = new Thickness(c == ink ? 2 : 1),
+                    Tag = c,
+                    ToolTip = "Выбрать цвет"
+                };
+                swatch.Click += (s, e) => { SetInk((Color)((Button)s).Tag); palette.IsOpen = false; };
+                wrap.Children.Add(swatch);
+            }
+            var border = new Border
+            {
+                Background = ToolbarBg,
+                BorderBrush = Theme.Line,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(6),
+                Child = wrap
+            };
+            return new Popup
+            {
+                Placement = PlacementMode.Bottom,
+                PlacementTarget = colorButton,
+                StaysOpen = false,
+                AllowsTransparency = true,
+                PopupAnimation = PopupAnimation.Fade,
+                VerticalOffset = 6,
+                Child = border
+            };
+        }
+
+        void SetInk(Color c)
+        {
+            ink = c;
+            if (colorButton != null && colorButton.Content is Ellipse)
+                ((Ellipse)colorButton.Content).Fill = new SolidColorBrush(ink);
+            if (palette != null && palette.Child is Border)
+            {
+                var wrap = ((Border)palette.Child).Child as WrapPanel;
+                if (wrap != null)
+                {
+                    foreach (var child in wrap.Children.OfType<Button>())
+                    {
+                        bool on = child.Tag is Color && (Color)child.Tag == ink;
+                        child.BorderBrush = on ? Theme.Text : Theme.Line;
+                        child.BorderThickness = new Thickness(on ? 2 : 1);
+                    }
+                }
+            }
+            if (pending != null) { pending.Ink = ink; annLayer.Refresh(); }
         }
 
         Button MakeToolButton(PreviewTool t, string tip, Geometry icon, bool filled)
@@ -438,9 +603,11 @@ namespace ThodShot
                 Style = Styles.Button(2),
                 Width = 34,
                 Height = 34,
-                Padding = new Thickness(8),
+                Padding = new Thickness(0),
                 Margin = new Thickness(1, 0, 1, 0),
                 Background = Brushes.Transparent,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
                 ToolTip = tip
             };
             b.Click += (s, e) => click();
@@ -590,15 +757,19 @@ namespace ThodShot
                 return;
             }
 
-            if (tool == PreviewTool.Marker)
+            if (tool == PreviewTool.Highlighter || tool == PreviewTool.Pen)
             {
-                marker = new MarkerAnnotation { Thickness = Math.Max(11, Math.Min(source.PixelWidth, source.PixelHeight) * 0.011) };
-                marker.Points.Add(p);
-                annLayer.Items.Add(marker);
-                markerDrawing = true;
+                freehand = tool == PreviewTool.Highlighter
+                    ? (FreehandAnnotation)new HighlighterAnnotation()
+                    : new PenAnnotation();
+                freehand.Ink = ink;
+                freehand.Thickness = tool == PreviewTool.Highlighter ? Math.Max(8, lineWidth * 2.4) : Math.Max(1, lineWidth);
+                freehand.Points.Add(p);
+                annLayer.Items.Add(freehand);
+                freehandDrawing = true;
                 input.CaptureMouse();
                 annLayer.Refresh();
-                SetStatus("Маркер: ведите мышью, отпустите кнопку");
+                SetStatus((tool == PreviewTool.Highlighter ? "Выделитель" : "Маркер") + ": ведите мышью, отпустите кнопку");
                 e.Handled = true;
                 return;
             }
@@ -610,15 +781,17 @@ namespace ThodShot
                     {
                         Start = p,
                         End = p,
-                        Thickness = Math.Max(3, Math.Min(source.PixelWidth, source.PixelHeight) * 0.0036),
-                        Head = Math.Max(14, Math.Min(source.PixelWidth, source.PixelHeight) * 0.019)
+                        Ink = ink,
+                        Thickness = Math.Max(1, lineWidth),
+                        Head = Math.Max(14, lineWidth * 4)
                     };
                 else
                     pending = new DiamondAnnotation
                     {
                         Start = p,
                         End = p,
-                        Thickness = Math.Max(3, Math.Min(source.PixelWidth, source.PixelHeight) * 0.0036)
+                        Ink = ink,
+                        Thickness = Math.Max(1, lineWidth)
                     };
                 annLayer.Pending = pending;
                 annLayer.Refresh();
@@ -668,13 +841,13 @@ namespace ThodShot
                 }));
                 return;
             }
-            if (markerDrawing && marker != null)
+            if (freehandDrawing && freehand != null)
             {
-                Point last = marker.Points[marker.Points.Count - 1];
+                Point last = freehand.Points[freehand.Points.Count - 1];
                 double dx = p.X - last.X, dy = p.Y - last.Y;
                 if (dx * dx + dy * dy >= 4)
                 {
-                    marker.Points.Add(p);
+                    freehand.Points.Add(p);
                     annLayer.Refresh();
                 }
                 return;
@@ -697,11 +870,11 @@ namespace ThodShot
                 input.ReleaseMouseCapture();
                 UpdateCursor(e.GetPosition(input));
             }
-            if (markerDrawing)
+            if (freehandDrawing)
             {
-                markerDrawing = false;
+                freehandDrawing = false;
                 input.ReleaseMouseCapture();
-                marker = null;
+                freehand = null;
                 AnnotationsChanged();
                 SetStatus("Пометка добавлена · Ctrl+Z — отменить");
             }
@@ -717,11 +890,11 @@ namespace ThodShot
 
         void OnRightDown(object sender, MouseButtonEventArgs e)
         {
-            if (markerDrawing && marker != null)
+            if (freehandDrawing && freehand != null)
             {
-                annLayer.Items.Remove(marker);
-                marker = null;
-                markerDrawing = false;
+                annLayer.Items.Remove(freehand);
+                freehand = null;
+                freehandDrawing = false;
                 input.ReleaseMouseCapture();
                 annLayer.Refresh();
                 UpdateUndo();
@@ -856,18 +1029,19 @@ namespace ThodShot
             WithClipboard(() => Clipboard.SetImage(img));
         }
 
-        void CopyImageWithStatus()
+        void CopyImageWithStatus(bool closeAfter = false)
         {
             try
             {
                 var img = Compose();
                 CopyImage(img);
                 SetStatus(annLayer.Items.Count > 0 ? "Изображение с пометками скопировано" : "Изображение скопировано в буфер обмена");
+                if (closeAfter) Close();
             }
             catch (Exception ex) { Log.Write(ex.ToString()); SetStatus("Не удалось скопировать: " + ex.Message, true); }
         }
 
-        void DoSave()
+        void DoSave(bool closeAfter = false)
         {
             try
             {
@@ -909,6 +1083,7 @@ namespace ThodShot
                 SetStatus("Сохранено: " + System.IO.Path.GetFileName(savedPath) + " · картинка в буфере");
                 if (s.OpenFolderAfterSave)
                     Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + savedPath + "\"") { UseShellExecute = true });
+                if (closeAfter) Close();
             }
             catch (Exception ex)
             {
