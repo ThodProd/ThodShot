@@ -168,7 +168,7 @@ namespace ThodShot
         readonly byte[] png;
         readonly BitmapSource source;
         readonly Grid imageArea, viewport;
-        readonly Grid stage;
+        readonly Canvas stage;
         readonly Grid imageGrid;
         readonly AnnotationCanvas annLayer;
         readonly Canvas ocrLayer, input;
@@ -238,22 +238,25 @@ namespace ThodShot
             baseH = ih;
             dpiCurrent = dpiScale;
             contentScale.ScaleX = contentScale.ScaleY = 1.0 / dpiScale;
-            stage = new Grid
+            // Canvas не сжимает ребёнка до своего размера и не ставит ему
+            // layout clip. Поэтому увеличенную картинку можно свободно
+            // двигать, а обрезает её только сам viewport по своим границам.
+            stage = new Canvas
             {
-                Width = iw,
-                Height = ih,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
+                Background = Brushes.Transparent,
+                ClipToBounds = true,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch
             };
-            stage.RenderTransform = pan;
 
             imageGrid = new Grid
             {
                 Width = source.PixelWidth,
                 Height = source.PixelHeight,
                 LayoutTransform = contentScale,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
+                RenderTransform = pan,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
             };
             var image = new System.Windows.Controls.Image { Source = source, Stretch = Stretch.Fill };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
@@ -770,33 +773,43 @@ namespace ThodShot
         {
             double ns = Math.Max(fitScale, Math.Min(8.0, target));
             if (Math.Abs(ns - scale) < 0.0001) return;
-            Point p = viewport.TranslatePoint(viewportPoint, stage);
-            double ux = (p.X - stage.Width / 2) / scale;
-            double uy = (p.Y - stage.Height / 2) / scale;
-            pan.X += (scale - ns) * ux;
-            pan.Y += (scale - ns) * uy;
+
+            // Точка под курсором в координатах исходного снимка.
+            Point p = viewport.TranslatePoint(viewportPoint, imageGrid);
+            double ux = p.X - source.PixelWidth / 2.0;
+            double uy = p.Y - source.PixelHeight / 2.0;
+            double vx = viewportPoint.X - viewport.ActualWidth / 2.0;
+            double vy = viewportPoint.Y - viewport.ActualHeight / 2.0;
+
             scale = ns;
-            if (Math.Abs(scale - fitScale) < 0.0001) { pan.X = pan.Y = 0; }
+            if (Math.Abs(scale - fitScale) < 0.0001)
+            {
+                pan.X = pan.Y = 0;
+            }
+            else
+            {
+                double k = scale / dpiCurrent;
+                pan.X = vx - ux * k;
+                pan.Y = vy - uy * k;
+            }
             ApplyZoom();
             ClampPan();
         }
 
         void ClampPan()
         {
-            double vw = viewport.ActualWidth, vh = viewport.ActualHeight;
-            double maxX = Math.Max(0, (stage.Width - vw) / 2);
-            double maxY = Math.Max(0, (stage.Height - vh) / 2);
+            double maxX = Math.Max(0, (baseW * scale - viewport.ActualWidth) / 2);
+            double maxY = Math.Max(0, (baseH * scale - viewport.ActualHeight) / 2);
             pan.X = Math.Max(-maxX, Math.Min(maxX, pan.X));
             pan.Y = Math.Max(-maxY, Math.Min(maxY, pan.Y));
         }
 
         void ApplyZoom()
         {
-            double layoutScale = scale / dpiCurrent;
-            contentScale.ScaleX = contentScale.ScaleY = layoutScale;
-            stage.Width = baseW * scale;
-            stage.Height = baseH * scale;
-            stage.RenderTransform = pan;
+            contentScale.ScaleX = contentScale.ScaleY = scale / dpiCurrent;
+            double cw = baseW * scale, ch = baseH * scale;
+            Canvas.SetLeft(imageGrid, (viewport.ActualWidth - cw) / 2);
+            Canvas.SetTop(imageGrid, (viewport.ActualHeight - ch) / 2);
             UpdateCursor(null);
         }
 
