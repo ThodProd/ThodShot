@@ -1,0 +1,57 @@
+name: release
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'hub/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ThodProd/ThodHUB
+          path: hub-tools
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Версия
+        id: v
+        shell: pwsh
+        run: |
+          $m = Get-Content hub/manifest.json -Raw | ConvertFrom-Json
+          "version=$($m.version)" >> $env:GITHUB_OUTPUT
+      - name: Релиз уже есть?
+        id: exists
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "hub-v${{ steps.v.outputs.version }}" --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) { "skip=true" >> $env:GITHUB_OUTPUT } else { "skip=false" >> $env:GITHUB_OUTPUT }
+          $global:LASTEXITCODE = 0
+      - name: Сборка
+        if: steps.exists.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          dotnet publish src/ThodShot/ThodShot.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o stage/app
+          if ($LASTEXITCODE -ne 0) { throw 'Сборка не удалась' }
+          Copy-Item hub/manifest.json stage/manifest.json
+          Get-ChildItem stage/app -Exclude ThodShot.exe | Remove-Item -Recurse -Force
+      - name: Упаковка и проверка
+        if: steps.exists.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          $notes = (Get-Content hub/notes.txt -Raw -Encoding UTF8).Trim()
+          ./hub-tools/scripts/package-module.ps1 -PackageDirectory stage -Repository "${{ github.repository }}" -OutputDirectory out -Notes $notes
+      - name: Публикация release
+        if: steps.exists.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          gh release create "hub-v$v" (Get-ChildItem out/*.zip).FullName out/thodhub-release.json --repo "${{ github.repository }}" --title "ThodShot $v" --notes-file hub/notes.txt --latest
