@@ -175,8 +175,9 @@ namespace ThodShot
         readonly TextBlock status;
         readonly Button btnOcr, btnCopy, btnSave, btnGear;
         readonly Rectangle marquee;
-        readonly ScaleTransform zoomScale = new ScaleTransform(1, 1);
+        readonly ScaleTransform contentScale = new ScaleTransform(1, 1);
         readonly TranslateTransform pan = new TranslateTransform(0, 0);
+        double baseW, baseH, dpiCurrent = 1;
         readonly List<KeyValuePair<Button, PreviewTool>> toolButtons = new List<KeyValuePair<Button, PreviewTool>>();
         readonly double dpiScale;
 
@@ -233,24 +234,24 @@ namespace ThodShot
             viewport = new Grid { Background = Theme.Surface, ClipToBounds = true };
 
             double iw = source.PixelWidth / dpiScale, ih = source.PixelHeight / dpiScale;
+            baseW = iw;
+            baseH = ih;
+            dpiCurrent = dpiScale;
+            contentScale.ScaleX = contentScale.ScaleY = 1.0 / dpiScale;
             stage = new Grid
             {
                 Width = iw,
                 Height = ih,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                RenderTransformOrigin = new Point(0.5, 0.5)
+                VerticalAlignment = VerticalAlignment.Center
             };
-            var tg = new TransformGroup();
-            tg.Children.Add(zoomScale);
-            tg.Children.Add(pan);
-            stage.RenderTransform = tg;
+            stage.RenderTransform = pan;
 
             imageGrid = new Grid
             {
                 Width = source.PixelWidth,
                 Height = source.PixelHeight,
-                LayoutTransform = new ScaleTransform(1.0 / dpiScale, 1.0 / dpiScale),
+                LayoutTransform = contentScale,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -700,10 +701,24 @@ namespace ThodShot
 
         void UpdateScale()
         {
-            var dpi = VisualTreeHelper.GetDpi(this);
-            imageGrid.LayoutTransform = new ScaleTransform(1.0 / dpi.DpiScaleX, 1.0 / dpi.DpiScaleY);
-            stage.Width = source.PixelWidth / dpi.DpiScaleX;
-            stage.Height = source.PixelHeight / dpi.DpiScaleY;
+            // Размеры исходника и viewport переводим в одни единицы — DIP.
+            // Масштаб меняем LayoutTransform'ом картинки, а не RenderTransform'ом
+            // слишком большого stage: иначе WPF обрезает stage по слоту раскладки
+            // до размера viewport ещё до применения масштаба.
+            var dpi = VisualTreeHelper.GetDpi(viewport);
+            dpiCurrent = dpi.DpiScaleX;
+            baseW = source.PixelWidth / dpiCurrent;
+            baseH = source.PixelHeight / dpiCurrent;
+            ApplyZoom();
+        }
+
+        double GetFitScale()
+        {
+            if (viewport.ActualWidth < 8 || viewport.ActualHeight < 8) return fitScale;
+            if (baseW < 1 || baseH < 1) return fitScale;
+
+            return Math.Max(0.02, Math.Min(1.0,
+                Math.Min(viewport.ActualWidth / baseW, viewport.ActualHeight / baseH)));
         }
 
         void ScheduleInitialFit()
@@ -726,8 +741,7 @@ namespace ThodShot
         void ResetFit()
         {
             if (viewport.ActualWidth < 8 || viewport.ActualHeight < 8) return;
-            fitScale = Math.Min(1.0, Math.Min(viewport.ActualWidth / stage.Width, viewport.ActualHeight / stage.Height));
-            fitScale = Math.Max(0.02, fitScale);
+            fitScale = GetFitScale();
             scale = fitScale;
             pan.X = pan.Y = 0;
             ApplyZoom();
@@ -737,12 +751,11 @@ namespace ThodShot
         {
             double oldFit = fitScale;
             if (viewport.ActualWidth < 8 || viewport.ActualHeight < 8) return;
-            fitScale = Math.Min(1.0, Math.Min(viewport.ActualWidth / stage.Width, viewport.ActualHeight / stage.Height));
-            fitScale = Math.Max(0.02, fitScale);
+            fitScale = GetFitScale();
             if (scale <= oldFit + 0.001) { scale = fitScale; pan.X = pan.Y = 0; }
             else if (scale < fitScale) scale = fitScale;
-            ClampPan();
             ApplyZoom();
+            ClampPan();
         }
 
         void OnWheel(object sender, MouseWheelEventArgs e)
@@ -758,29 +771,32 @@ namespace ThodShot
             double ns = Math.Max(fitScale, Math.Min(8.0, target));
             if (Math.Abs(ns - scale) < 0.0001) return;
             Point p = viewport.TranslatePoint(viewportPoint, stage);
-            double dx = p.X - stage.Width / 2;
-            double dy = p.Y - stage.Height / 2;
-            pan.X += (scale - ns) * dx;
-            pan.Y += (scale - ns) * dy;
+            double ux = (p.X - stage.Width / 2) / scale;
+            double uy = (p.Y - stage.Height / 2) / scale;
+            pan.X += (scale - ns) * ux;
+            pan.Y += (scale - ns) * uy;
             scale = ns;
             if (Math.Abs(scale - fitScale) < 0.0001) { pan.X = pan.Y = 0; }
-            ClampPan();
             ApplyZoom();
+            ClampPan();
         }
 
         void ClampPan()
         {
             double vw = viewport.ActualWidth, vh = viewport.ActualHeight;
-            double sw = stage.Width * scale, sh = stage.Height * scale;
-            double maxX = Math.Max(0, (sw - vw) / 2);
-            double maxY = Math.Max(0, (sh - vh) / 2);
+            double maxX = Math.Max(0, (stage.Width - vw) / 2);
+            double maxY = Math.Max(0, (stage.Height - vh) / 2);
             pan.X = Math.Max(-maxX, Math.Min(maxX, pan.X));
             pan.Y = Math.Max(-maxY, Math.Min(maxY, pan.Y));
         }
 
         void ApplyZoom()
         {
-            zoomScale.ScaleX = zoomScale.ScaleY = scale;
+            double layoutScale = scale / dpiCurrent;
+            contentScale.ScaleX = contentScale.ScaleY = layoutScale;
+            stage.Width = baseW * scale;
+            stage.Height = baseH * scale;
+            stage.RenderTransform = pan;
             UpdateCursor(null);
         }
 
@@ -909,7 +925,6 @@ namespace ThodShot
                 pan.X = panX0 + (now.X - panStart.X);
                 pan.Y = panY0 + (now.Y - panStart.Y);
                 ClampPan();
-                zoomScale.ScaleX = zoomScale.ScaleY = scale;
                 return;
             }
 
