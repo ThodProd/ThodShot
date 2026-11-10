@@ -186,6 +186,7 @@ namespace ThodShot
 
         double fitScale = 1, scale = 1;
         string savedPath;
+        bool firstFrameFitted;
         bool ocrBusy, ocrDone;
         int anchor = -1;
         bool dragWords, dragMarquee, panning, freehandDrawing, rectangleDrawing;
@@ -368,13 +369,23 @@ namespace ThodShot
             {
                 UpdateScale();
                 ResetFit();
-                // Первый ResetFit может выполниться до окончательной раскладки:
-                // без повторного расчёта большое изображение показывается 1:1 и обрезается.
+                // Loaded может сработать до того, как WPF задаст окончательный размер
+                // рабочей области. Пересчитываем после простоя очереди раскладки.
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     UpdateScale();
                     ResetFit();
-                }), DispatcherPriority.Loaded);
+                }), DispatcherPriority.ContextIdle);
+            };
+            // На части DPI-конфигураций первый реальный кадр приходит уже после
+            // ContextIdle. Это последнее безопасное место, где размер viewport
+            // окончательный; повторно не сбрасываем выбранный пользователем масштаб.
+            ContentRendered += (s, e) =>
+            {
+                if (firstFrameFitted) return;
+                UpdateScale();
+                ResetFit();
+                firstFrameFitted = true;
             };
             DpiChanged += (s, e) => { UpdateScale(); ResetFit(); };
 
