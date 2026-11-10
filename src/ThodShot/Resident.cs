@@ -150,6 +150,12 @@ namespace ThodShot
                 capturing = false;
                 overlay = null;
                 Log.Write("Ошибка съёмки: " + ex);
+                try
+                {
+                    System.Windows.Forms.MessageBox.Show("Не удалось сделать снимок: " + ex.Message,
+                        "ThodShot", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+                }
+                catch { }
             }
         }
 

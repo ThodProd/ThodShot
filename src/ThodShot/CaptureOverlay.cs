@@ -1,7 +1,9 @@
 using System;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace ThodShot
@@ -14,7 +16,19 @@ namespace ThodShot
             var bmp = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
-                g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
+                IntPtr dest = g.GetHdc();
+                IntPtr src = Native.GetDC(IntPtr.Zero);
+                try
+                {
+                    // SRCCOPY | CAPTUREBLT: включаем и слоистые окна
+                    if (!Native.BitBlt(dest, 0, 0, bounds.Width, bounds.Height, src, bounds.X, bounds.Y, 0x00CC0020u | 0x40000000u))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                finally
+                {
+                    Native.ReleaseDC(IntPtr.Zero, src);
+                    g.ReleaseHdc(dest);
+                }
             }
             return bmp;
         }

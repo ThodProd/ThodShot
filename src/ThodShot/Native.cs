@@ -31,6 +31,12 @@ namespace ThodShot
         public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")]
         public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height, IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
 
         public static void ForceForeground(IntPtr hwnd)
         {
