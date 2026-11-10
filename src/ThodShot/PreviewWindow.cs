@@ -330,7 +330,7 @@ namespace ThodShot
             btnCopy = MakeButton("Копировать", 0, () => CopyImageWithStatus(true));
             btnCopy.ToolTip = "Скопировать изображение с пометками (Ctrl+C)";
             btnSave = MakeButton("Сохранить", 1, () => DoSave(true));
-            btnSave.ToolTip = "Сохранить с пометками (Ctrl+S)";
+            btnSave.ToolTip = "Сохранить с пометками (Enter, Space или Ctrl+S)";
             btnGear = MakeButton("\uE713", 2, () => { if (Resident.Instance != null) Resident.Instance.ShowSettings(); });
             btnGear.FontFamily = new FontFamily("Segoe MDL2 Assets");
             btnGear.FontSize = 16;
@@ -390,7 +390,7 @@ namespace ThodShot
             DpiChanged += (s, e) => { UpdateScale(); ResetFit(); };
 
             PreviewKeyDown += OnKey;
-            SetStatus("Колесо мыши — масштаб · Перетаскивание — сдвиг · Ctrl+Z — отменить пометку");
+            SetStatus("Enter / Space — сохранить · Esc — отменить снимок · Колесо — масштаб");
         }
 
         // ---------- панель инструментов ----------
@@ -1122,6 +1122,26 @@ namespace ThodShot
             else if (e.Key == Key.Z) { Undo(); e.Handled = true; }
         }
 
+        protected override void OnPreviewKeyDown(KeyEventArgs e)
+        {
+            if (Keyboard.Modifiers == ModifierKeys.None)
+            {
+                if (e.Key == Key.Return || e.Key == Key.Enter || e.Key == Key.Space)
+                {
+                    DoSave(true);
+                    e.Handled = true;
+                    return;
+                }
+                if (e.Key == Key.Escape)
+                {
+                    DeleteShot();
+                    e.Handled = true;
+                    return;
+                }
+            }
+            base.OnPreviewKeyDown(e);
+        }
+
         // ---------- копирование / сохранение ----------
 
         static void WithClipboard(Action a)
@@ -1168,17 +1188,8 @@ namespace ThodShot
 
         void DeleteShot()
         {
-            try
-            {
-                if (!string.IsNullOrEmpty(savedPath) && File.Exists(savedPath))
-                    File.Delete(savedPath);
-                Close();
-            }
-            catch (Exception ex)
-            {
-                Log.Write(ex.ToString());
-                SetStatus("Не удалось удалить снимок: " + ex.Message, true);
-            }
+            // Корзина отменяет текущий снимок. Уже сохранённые файлы не затрагиваются.
+            Close();
         }
 
         void DoSave(bool closeAfter = false)
