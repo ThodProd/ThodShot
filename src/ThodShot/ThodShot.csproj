@@ -10,9 +10,9 @@
     <AssemblyName>ThodShot</AssemblyName>
     <RootNamespace>ThodShot</RootNamespace>
     <StartupObject>ThodShot.Program</StartupObject>
-    <Version>1.1.4</Version>
-    <AssemblyVersion>1.1.4.0</AssemblyVersion>
-    <FileVersion>1.1.4.0</FileVersion>
+    <Version>1.1.5</Version>
+    <AssemblyVersion>1.1.5.0</AssemblyVersion>
+    <FileVersion>1.1.5.0</FileVersion>
     <Product>ThodShot</Product>
     <Authors>ThodProd</Authors>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>

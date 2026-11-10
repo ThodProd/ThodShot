@@ -378,19 +378,14 @@ namespace ThodShot
                     ResetFit();
                 }), DispatcherPriority.ContextIdle);
             };
-            // На части DPI-конфигураций первый реальный кадр приходит уже после
-            // ContextIdle. Откладываем подгонку ещё на один idle-цикл после рендера:
-            // к этому моменту viewport уже имеет фактический размер окна. Выполняем
-            // один раз, чтобы не сбрасывать выбранный пользователем масштаб дальше.
+            // На части DPI-конфигураций WPF ещё меняет размеры viewport сразу после
+            // первого ContentRendered. Делаем две короткие контрольные подгонки, когда
+            // окно уже стабилизировалось; дальше масштаб пользователя не трогаем.
             ContentRendered += (s, e) =>
             {
                 if (initialFitScheduled) return;
                 initialFitScheduled = true;
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    UpdateScale();
-                    ResetFit();
-                }), DispatcherPriority.ApplicationIdle);
+                ScheduleInitialFit();
             };
             DpiChanged += (s, e) => { UpdateScale(); ResetFit(); };
 
@@ -709,6 +704,23 @@ namespace ThodShot
             imageGrid.LayoutTransform = new ScaleTransform(1.0 / dpi.DpiScaleX, 1.0 / dpi.DpiScaleY);
             stage.Width = source.PixelWidth / dpi.DpiScaleX;
             stage.Height = source.PixelHeight / dpi.DpiScaleY;
+        }
+
+        void ScheduleInitialFit()
+        {
+            int passes = 0;
+            var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle, Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(120)
+            };
+            timer.Tick += (s, e) =>
+            {
+                UpdateScale();
+                ResetFit();
+                if (++passes < 2) return;
+                timer.Stop();
+            };
+            timer.Start();
         }
 
         void ResetFit()
