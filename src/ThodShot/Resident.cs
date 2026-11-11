@@ -43,7 +43,7 @@ namespace ThodShot
             {
                 Icon = icon ?? SystemIcons.Application,
                 Text = "ThodShot — скриншоты",
-                Visible = true
+                Visible = AppSettings.Current.ShowTrayIcon
             };
             var menu = new System.Windows.Forms.ContextMenuStrip();
             menu.Items.Add("Сделать снимок", null, (s, e) => Dispatch(StartCapture));
@@ -99,11 +99,18 @@ namespace ThodShot
         {
             AppSettings.Current = AppSettings.Load();
             ApplyHook();
+            ApplyTray();
         }
 
         public void OnSettingsChanged()
         {
             ApplyHook();
+            ApplyTray();
+        }
+
+        void ApplyTray()
+        {
+            if (tray != null) tray.Visible = AppSettings.Current.ShowTrayIcon;
         }
 
         void Exit()

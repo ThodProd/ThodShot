@@ -69,8 +69,14 @@ namespace ThodShot
             panel.Children.Add(ToggleRow("Перехватывать PrintScreen",
                 "Другие программы скриншотов по PrintScreen не откроются",
                 () => AppSettings.Current.InterceptPrintScreen, v => AppSettings.Current.InterceptPrintScreen = v));
-            panel.Children.Add(ToggleRow("Запускать вместе с Windows", "Программа работает в трее без окна",
+            panel.Children.Add(ToggleRow("Запускать вместе с Windows", "Программа работает в фоне без окна",
                 () => AppSettings.Current.Autostart, v => AppSettings.Current.Autostart = v));
+
+            // Программа
+            panel.Children.Add(Section("Программа"));
+            panel.Children.Add(ToggleRow("Показывать значок в трее",
+                "Рядом с часами. По умолчанию выключено — программа работает без значка.",
+                () => AppSettings.Current.ShowTrayIcon, v => AppSettings.Current.ShowTrayIcon = v));
 
             // Распознавание
             panel.Children.Add(Section("Распознавание текста"));

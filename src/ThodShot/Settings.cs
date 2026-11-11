@@ -56,6 +56,7 @@ namespace ThodShot
     {
         public string SaveFolder { get; set; } = "";
         public bool Autostart { get; set; } = true;
+        public bool ShowTrayIcon { get; set; }
         public bool InterceptPrintScreen { get; set; } = true;
         public string DefaultMode { get; set; } = "region";   // region | full
         public string Theme { get; set; } = "dark";           // dark | light | system
