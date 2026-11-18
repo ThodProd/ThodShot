@@ -2,10 +2,13 @@ name: release
 on:
   push:
     branches: [main]
-    paths: ['src/**', 'hub/**']
+    paths: ['rust/**', 'hub/**', 'Cargo.toml', 'Cargo.lock', 'build.rs', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: thodshot-release
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: windows-latest
@@ -15,14 +18,22 @@ jobs:
         with:
           repository: ThodProd/ThodHUB
           path: hub-tools
-      - uses: actions/setup-dotnet@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          dotnet-version: '8.0.x'
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+      - name: Tests
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --target x86_64-pc-windows-msvc
       - name: Версия
         id: v
         shell: pwsh
         run: |
           $m = Get-Content hub/manifest.json -Raw | ConvertFrom-Json
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $crate = $metadata.packages | Where-Object name -eq thodshot
+          if ($crate.version -ne $m.version) { throw 'Версии Cargo.toml и hub/manifest.json различаются' }
           "version=$($m.version)" >> $env:GITHUB_OUTPUT
       - name: Релиз уже есть?
         id: exists
@@ -37,10 +48,11 @@ jobs:
         if: steps.exists.outputs.skip == 'false'
         shell: pwsh
         run: |
-          dotnet publish src/ThodShot/ThodShot.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o stage/app
+          cargo build --locked --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Сборка не удалась' }
+          New-Item -ItemType Directory -Path stage/app -Force | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/ThodShot.exe stage/app/ThodShot.exe
           Copy-Item hub/manifest.json stage/manifest.json
-          Get-ChildItem stage/app -Exclude ThodShot.exe | Remove-Item -Recurse -Force
       - name: Упаковка и проверка
         if: steps.exists.outputs.skip == 'false'
         shell: pwsh
@@ -54,4 +66,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = "${{ steps.v.outputs.version }}"
-          gh release create "hub-v$v" (Get-ChildItem out/*.zip).FullName out/thodhub-release.json --repo "${{ github.repository }}" --title "ThodShot $v" --notes-file hub/notes.txt --latest
+          gh release create "hub-v$v" "out/thodshot-$v-win-x64.zip" out/thodhub-release.json --target "${{ github.sha }}" --repo "${{ github.repository }}" --title "ThodShot $v" --notes-file hub/notes.txt --latest
