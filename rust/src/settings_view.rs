@@ -33,11 +33,21 @@ impl Section {
         ui.scope(|ui| {
             ui.spacing_mut().button_padding = egui::vec2(12., 7.);
             ui.spacing_mut().item_spacing = egui::vec2(8., 12.);
-            if ui.available_width() >= 580. {
+            let width = ui.available_width();
+            if width >= 580. {
                 ui.horizontal_top(|ui| {
-                    sidebar(ui, self, data_dir, notice);
-                    egui::Frame::new().inner_margin(24).show(ui, |ui| {
-                        self.content(ui, settings, notice);
+                    let sidebar_width = 200.;
+                    let content_width = width - sidebar_width - ui.spacing().item_spacing.x;
+                    let column = egui::Layout::top_down(egui::Align::Min);
+                    ui.allocate_ui_with_layout(egui::vec2(sidebar_width, 0.), column, |ui| {
+                        ui.set_width(sidebar_width);
+                        sidebar(ui, self, data_dir, notice);
+                    });
+                    ui.allocate_ui_with_layout(egui::vec2(content_width, 0.), column, |ui| {
+                        ui.set_width(content_width);
+                        egui::Frame::new().inner_margin(24).show(ui, |ui| {
+                            self.content(ui, settings, notice);
+                        });
                     });
                 });
             } else {
@@ -256,5 +266,46 @@ pub fn surface(ui: &egui::Ui) -> Color32 {
         Color32::from_rgb(30, 35, 45)
     } else {
         Color32::WHITE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_sections_fit_narrow_and_regular_windows() {
+        for width in [430., 800.] {
+            for mut section in Section::ALL {
+                let context = egui::Context::default();
+                crate::app::configure_fonts(&context);
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 504.),
+                    )),
+                    ..Default::default()
+                };
+                let _ = context.run(input, |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            let scroll = egui::ScrollArea::vertical().show(ui, |ui| {
+                                section.show(
+                                    ui,
+                                    &mut AppSettings::default(),
+                                    Path::new("data"),
+                                    &mut String::new(),
+                                );
+                            });
+                            assert!(
+                                scroll.content_size.x <= width + 1.,
+                                "{} overlaps the window edge at {width} points",
+                                section.title()
+                            );
+                        });
+                });
+            }
+        }
     }
 }

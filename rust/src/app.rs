@@ -62,6 +62,23 @@ fn icon() -> egui::IconData {
     }
 }
 
+pub(crate) fn configure_fonts(ctx: &egui::Context) {
+    if let Some(bytes) = std::env::var_os("WINDIR")
+        .and_then(|dir| std::fs::read(PathBuf::from(dir).join("Fonts/segoeui.ttf")).ok())
+    {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("Segoe".into(), egui::FontData::from_owned(bytes).into());
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Segoe".into());
+        ctx.set_fonts(fonts);
+    }
+}
+
 fn monitor_at_cursor(capture: &Capture) -> Rect {
     let mut cursor = POINT::default();
     let _ = unsafe { GetCursorPos(&mut cursor) };
@@ -128,20 +145,7 @@ impl App {
         command: String,
         events: [ipc::Listener; 4],
     ) -> Result<Self> {
-        let mut fonts = egui::FontDefinitions::default();
-        if let Some(bytes) = std::env::var_os("WINDIR")
-            .and_then(|dir| std::fs::read(PathBuf::from(dir).join("Fonts/segoeui.ttf")).ok())
-        {
-            fonts
-                .font_data
-                .insert("Segoe".into(), egui::FontData::from_owned(bytes).into());
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Proportional)
-                .unwrap()
-                .insert(0, "Segoe".into());
-        }
-        cc.egui_ctx.set_fonts(fonts);
+        configure_fonts(&cc.egui_ctx);
         let hook = Hook::new()?;
         hook.enable(settings.intercept_print_screen);
         let menu = tray_icon::menu::Menu::new();
