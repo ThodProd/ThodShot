@@ -13,6 +13,7 @@ mod settings_view;
 use anyhow::{Result, ensure};
 use integration::Integration;
 use settings::{AppSettings, Paths};
+use std::process::Stdio;
 
 fn main() {
     let result = Paths::initialize().and_then(|paths| {
@@ -78,8 +79,12 @@ fn apply_integrations(paths: &Paths, mut settings: AppSettings) -> Result<()> {
         ipc::signal(ipc::RELOAD_EVENT)?;
     } else if settings.intercept_print_screen {
         // ThodHUB stops the previous resident before installing the update.
+        // Its installer waits for both output pipes to close after this command exits.
         std::process::Command::new(std::env::current_exe()?)
             .arg("--background")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()?;
     }
     Ok(())
