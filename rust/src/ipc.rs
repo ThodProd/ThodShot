@@ -126,7 +126,7 @@ impl Listener {
         Ok(Self(unsafe { OwnedHandle::from_raw_handle(handle.0) }))
     }
 
-    fn handle(&self) -> HANDLE {
+    pub(crate) fn handle(&self) -> HANDLE {
         HANDLE(self.0.as_raw_handle())
     }
 }

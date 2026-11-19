@@ -42,7 +42,7 @@ fn run(paths: &Paths) -> Result<()> {
     }
 
     match command.as_str() {
-        "--register-integrations" => Integration::apply(paths, &mut AppSettings::load(paths)?)?,
+        "--register-integrations" => apply_integrations(paths, AppSettings::load(paths)?)?,
         "--cleanup" => Integration::cleanup(paths)?,
         "--stop-background" => {
             if !ipc::stop_running(15_000)? {
@@ -52,14 +52,7 @@ fn run(paths: &Paths) -> Result<()> {
         "--enable-printscreen" | "--disable-printscreen" => {
             let mut settings = AppSettings::load(paths)?;
             settings.intercept_print_screen = command == "--enable-printscreen";
-            Integration::apply(paths, &mut settings)?;
-            if ipc::is_running()? {
-                ipc::signal(ipc::RELOAD_EVENT)?;
-            } else if settings.intercept_print_screen {
-                std::process::Command::new(std::env::current_exe()?)
-                    .arg("--background")
-                    .spawn()?;
-            }
+            apply_integrations(paths, settings)?;
         }
         _ => {
             // Create the listeners before publishing the mutex so clients can queue startup commands.
@@ -75,6 +68,19 @@ fn run(paths: &Paths) -> Result<()> {
             }
             app::run(paths.clone(), command, listeners)?;
         }
+    }
+    Ok(())
+}
+
+fn apply_integrations(paths: &Paths, mut settings: AppSettings) -> Result<()> {
+    Integration::apply(paths, &mut settings)?;
+    if ipc::is_running()? {
+        ipc::signal(ipc::RELOAD_EVENT)?;
+    } else if settings.intercept_print_screen {
+        // ThodHUB stops the previous resident before installing the update.
+        std::process::Command::new(std::env::current_exe()?)
+            .arg("--background")
+            .spawn()?;
     }
     Ok(())
 }
