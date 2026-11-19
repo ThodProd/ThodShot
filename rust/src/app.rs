@@ -5,7 +5,10 @@ use crate::{
     integration::Integration,
     ipc, ocr,
     settings::{AppSettings, Paths},
-    settings_view::{self, Section},
+    settings_view::{
+        Section,
+        kit::{self, Icon, Look},
+    },
 };
 use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
@@ -115,6 +118,7 @@ struct App {
     image: Option<RgbaImage>,
     texture: Option<egui::TextureHandle>,
     marks: Vec<Mark>,
+    undone_marks: Vec<Mark>,
     pending: Option<Mark>,
     tool: Tool,
     color: Color32,
@@ -186,6 +190,7 @@ impl App {
             image: None,
             texture: None,
             marks: vec![],
+            undone_marks: vec![],
             pending: None,
             tool: Tool::Cursor,
             color: Color32::from_rgb(242, 59, 48),
@@ -245,13 +250,20 @@ impl App {
         } else {
             Color32::from_rgb(241, 245, 251)
         };
+        v.window_corner_radius = 16.into();
+        v.menu_corner_radius = 12.into();
         v.window_fill = if dark {
-            Color32::from_rgb(30, 35, 45)
+            Color32::from_rgba_unmultiplied(30, 35, 45, 238)
         } else {
-            Color32::WHITE
+            Color32::from_rgba_unmultiplied(255, 255, 255, 240)
         };
-        v.window_corner_radius = 12.into();
-        v.menu_corner_radius = 10.into();
+        v.selection.bg_fill = kit::ACCENT.gamma_multiply(0.45);
+        v.selection.stroke = Stroke::new(1_f32, kit::ACCENT);
+        v.widgets.hovered.weak_bg_fill = if dark {
+            Color32::from_rgb(54, 62, 78)
+        } else {
+            Color32::from_rgb(220, 231, 247)
+        };
         v.widgets.noninteractive.bg_stroke.color = if dark {
             Color32::from_rgb(53, 63, 79)
         } else {
@@ -268,7 +280,7 @@ impl App {
             &mut v.widgets.active,
             &mut v.widgets.open,
         ] {
-            widget.corner_radius = 7.into();
+            widget.corner_radius = 10.into();
         }
         ctx.set_visuals(v);
         ctx.style_mut(|style| {
@@ -295,6 +307,7 @@ impl App {
             self.image = None;
             self.texture = None;
             self.marks.clear();
+            self.undone_marks.clear();
             self.pending = None;
             self.ocr_rx = None;
             self.words.clear();
@@ -365,6 +378,7 @@ impl App {
         self.texture = None;
         self.image = None;
         self.marks.clear();
+        self.undone_marks.clear();
         self.pending = None;
         self.words.clear();
         self.selected.clear();
@@ -520,15 +534,65 @@ impl App {
             Err(e) => self.notice = e.to_string(),
         }
     }
+    fn undo_mark(&mut self) {
+        if self.pending.take().is_none()
+            && let Some(mark) = self.marks.pop()
+        {
+            self.undone_marks.push(mark);
+        }
+    }
+
+    fn redo_mark(&mut self) {
+        if let Some(mark) = self.undone_marks.pop() {
+            self.marks.push(mark);
+        }
+    }
+
     fn header(&mut self, ctx: &egui::Context, title: &str) {
+        let fill = ctx.style().visuals.panel_fill;
         egui::TopBottomPanel::top("header")
-            .exact_height(44.)
+            .exact_height(48.)
+            .frame(
+                egui::Frame::new()
+                    .fill(fill)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(10.);
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.;
+                    let preview = self.page == Page::Preview;
+                    if preview {
+                        let size = Vec2::new(34., 32.);
+                        let can_undo = !self.marks.is_empty() || self.pending.is_some();
+                        if kit::icon_btn_sized(
+                            ui,
+                            Icon::Undo,
+                            "Отменить (Ctrl+Z)",
+                            Look::Plain,
+                            can_undo,
+                            size,
+                        )
+                        .clicked()
+                        {
+                            self.undo_mark();
+                        }
+                        if kit::icon_btn_sized(
+                            ui,
+                            Icon::Redo,
+                            "Повторить (Ctrl+Y)",
+                            Look::Plain,
+                            !self.undone_marks.is_empty(),
+                            size,
+                        )
+                        .clicked()
+                        {
+                            self.redo_mark();
+                        }
+                    }
+                    let controls_width = if preview { 124. } else { 84. };
                     let r = ui.add_sized(
-                        [(ui.available_width() - 86.).max(0.), 34.],
-                        egui::Label::new(egui::RichText::new(title).strong())
+                        [(ui.available_width() - controls_width).max(0.), 34.],
+                        egui::Label::new(egui::RichText::new(title).strong().size(14.5))
                             .halign(egui::Align::Min)
                             .truncate()
                             .sense(Sense::click_and_drag()),
@@ -540,18 +604,41 @@ impl App {
                         let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
                     }
-                    if ui
-                        .add_sized([32., 28.], egui::Button::new("□"))
-                        .on_hover_text("Развернуть или восстановить")
+                    if preview
+                        && kit::icon_btn_sized(
+                            ui,
+                            Icon::Gear,
+                            "Настройки",
+                            Look::Plain,
+                            true,
+                            Vec2::new(34., 32.),
+                        )
                         .clicked()
+                    {
+                        self.settings_open = true;
+                    }
+                    if kit::icon_btn_sized(
+                        ui,
+                        Icon::Maximize,
+                        "Развернуть или восстановить",
+                        Look::Plain,
+                        true,
+                        Vec2::new(34., 32.),
+                    )
+                    .clicked()
                     {
                         let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
                     }
-                    if ui
-                        .add_sized([32., 28.], egui::Button::new("×"))
-                        .on_hover_text("Закрыть")
-                        .clicked()
+                    if kit::icon_btn_sized(
+                        ui,
+                        Icon::Close,
+                        "Закрыть",
+                        Look::Danger,
+                        true,
+                        Vec2::new(34., 32.),
+                    )
+                    .clicked()
                     {
                         self.show(Page::Hidden, ctx);
                     }
@@ -693,30 +780,39 @@ impl App {
                     )
                     .order(egui::Order::Foreground)
                     .show(ctx, |ui| {
-                        egui::Frame::popup(ui.style())
-                            .inner_margin(8)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .add(settings_view::option_button(
-                                            ui,
-                                            "Область",
-                                            !self.full,
-                                        ))
-                                        .clicked()
-                                    {
-                                        self.full = false;
-                                        self.selection = None;
-                                    }
-                                    if ui.button("Весь экран").clicked() {
-                                        finish = Some(toolbar_monitor);
-                                    }
-                                    if ui.button("×").on_hover_text("Отмена (Esc)").clicked()
-                                    {
-                                        self.show(Page::Hidden, ctx);
-                                    }
-                                });
+                        kit::glass(ui).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.;
+                                let region = if self.full {
+                                    Look::Plain
+                                } else {
+                                    Look::Selected
+                                };
+                                if kit::icon_btn(ui, Icon::Region, "Выделить область", region, true)
+                                    .clicked()
+                                {
+                                    self.full = false;
+                                    self.selection = None;
+                                }
+                                if kit::icon_btn(ui, Icon::Screen, "Весь экран", Look::Plain, true)
+                                    .clicked()
+                                {
+                                    finish = Some(toolbar_monitor);
+                                }
+                                kit::vsep(ui);
+                                if kit::icon_btn(
+                                    ui,
+                                    Icon::Close,
+                                    "Отмена (Esc)",
+                                    Look::Danger,
+                                    true,
+                                )
+                                .clicked()
+                                {
+                                    self.show(Page::Hidden, ctx);
+                                }
                             });
+                        });
                     });
                 if ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space))
                 {
@@ -738,143 +834,139 @@ impl App {
             |image| format!("Скриншот · {} × {}", image.width(), image.height()),
         );
         self.header(ctx, &title);
-        egui::TopBottomPanel::top("tools").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (t, label) in [
-                    (Tool::Cursor, "Курсор"),
-                    (Tool::Arrow, "Стрелка"),
-                    (Tool::Rectangle, "Прямоугольник"),
-                    (Tool::Highlighter, "Выделитель"),
-                    (Tool::Pen, "Маркер"),
-                ] {
-                    let selected = self.tool == t;
-                    let response = ui.add(settings_view::option_button(ui, label, selected));
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::WidgetType::SelectableLabel,
-                            true,
-                            selected,
-                            label,
-                        )
-                    });
-                    if response.clicked() {
-                        self.tool = t;
-                        self.pending = None;
-                    }
-                }
-                ui.separator();
-                ui.add(
-                    egui::Slider::new(&mut self.width, 2.0..=20.0)
-                        .integer()
-                        .text("Толщина"),
-                );
-                let (swatch, _) = ui.allocate_exact_size(Vec2::splat(24.), Sense::hover());
-                let width = if self.tool == Tool::Highlighter {
-                    (self.width * 2.4).max(8.)
-                } else {
-                    self.width
-                };
-                ui.painter()
-                    .circle_filled(swatch.center(), (width / 2.).min(12.), self.color);
-                egui::color_picker::color_edit_button_srgba(
-                    ui,
-                    &mut self.color,
-                    egui::color_picker::Alpha::Opaque,
-                );
-                if let Some(mark) = &mut self.pending {
-                    mark.color = self.color;
-                    mark.width = width;
-                }
-                if ui.button("↶").on_hover_text("Отменить (Ctrl+Z)").clicked() {
-                    if self.pending.take().is_none() {
-                        self.marks.pop();
-                    }
-                }
-            });
-        });
-        egui::TopBottomPanel::bottom("actions").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        self.ocr_rx.is_none(),
-                        egui::Button::new(
-                            match (
-                                self.ocr_rx.is_some(),
-                                self.words.is_empty(),
-                                self.ocr_visible,
-                            ) {
-                                (true, _, _) => "Распознавание…",
-                                (_, true, _) => "Распознать",
-                                (_, _, true) => "Скрыть текст",
-                                _ => "Показать текст",
-                            },
-                        ),
-                    )
-                    .clicked()
-                {
-                    if !self.words.is_empty() {
-                        self.ocr_visible = !self.ocr_visible;
-                        self.selected.clear();
-                        self.notice = if self.ocr_visible {
-                            "Выделите текст мышью · Ctrl+C — копировать".into()
-                        } else {
-                            String::new()
-                        };
-                        if self.ocr_visible {
-                            self.tool = Tool::Cursor;
-                            self.pending = None;
-                        }
-                    } else if let Some(img) = self.image.clone() {
-                        let language = self.settings.ocr_language.clone();
-                        let (tx, rx) = mpsc::channel();
-                        self.ocr_rx = Some(rx);
-                        std::thread::spawn(move || {
-                            let _ = tx.send(ocr::recognize(img, language));
-                        });
-                    }
-                }
-                ui.add_space((ui.available_width() - 388.).max(4.));
-                if ui.button("Копировать").clicked() {
-                    self.copy_image(true, ctx);
-                }
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("Сохранить")
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(Color32::from_rgb(42, 106, 210)),
-                    )
-                    .on_hover_text("Enter, Space или Ctrl+S")
-                    .clicked()
-                {
-                    self.save(true, ctx);
-                }
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("Отменить снимок").color(
-                            if ui.visuals().dark_mode {
-                                Color32::from_rgb(255, 167, 171)
+        let max_w = (ctx.screen_rect().width() - 32.).max(300.);
+        let tools = egui::Area::new("preview tools".into())
+            .anchor(egui::Align2::CENTER_TOP, Vec2::new(0., 56.))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(max_w);
+                kit::glass(ui).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6., 6.);
+                        for (t, icon, tip) in [
+                            (Tool::Cursor, Icon::Cursor, "Курсор"),
+                            (Tool::Arrow, Icon::Arrow, "Стрелка"),
+                            (Tool::Rectangle, Icon::Rectangle, "Рамка"),
+                            (Tool::Highlighter, Icon::Highlighter, "Выделитель"),
+                            (Tool::Pen, Icon::Pen, "Маркер"),
+                        ] {
+                            let look = if self.tool == t {
+                                Look::Selected
                             } else {
-                                Color32::from_rgb(158, 35, 50)
-                            },
-                        ))
-                        .frame(false),
-                    )
-                    .on_hover_text("Закрыть предпросмотр (Esc)")
-                    .clicked()
-                {
-                    self.show(Page::Hidden, ctx);
-                }
-                if ui.button("Настройки").clicked() {
-                    self.settings_open = true;
-                }
+                                Look::Plain
+                            };
+                            if kit::icon_btn(ui, icon, tip, look, true).clicked() {
+                                self.tool = t;
+                                self.pending = None;
+                            }
+                        }
+                        kit::vsep(ui);
+                        ui.spacing_mut().slider_width = 84.;
+                        ui.add(
+                            egui::Slider::new(&mut self.width, 2.0..=20.0)
+                                .integer()
+                                .show_value(false),
+                        )
+                        .on_hover_text("Толщина линии");
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(26.), Sense::hover());
+                        let width = if self.tool == Tool::Highlighter {
+                            (self.width * 2.4).max(8.)
+                        } else {
+                            self.width
+                        };
+                        ui.painter()
+                            .circle_filled(dot.center(), (width / 2.).min(12.), self.color);
+                        kit::vsep(ui);
+                        for (c, name) in kit::PALETTE {
+                            if kit::swatch(ui, c, name, self.color == c).clicked() {
+                                self.color = c;
+                            }
+                        }
+                        egui::color_picker::color_edit_button_srgba(
+                            ui,
+                            &mut self.color,
+                            egui::color_picker::Alpha::Opaque,
+                        );
+                        if let Some(mark) = &mut self.pending {
+                            mark.color = self.color;
+                            mark.width = width;
+                        }
+                    });
+                });
             });
-            if !self.notice.is_empty() {
-                ui.label(egui::RichText::new(&self.notice).weak());
-            }
-        });
+        let ocr = egui::Area::new("preview OCR".into())
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(16., -18.))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                kit::glass(ui).show(ui, |ui| {
+                    let busy = self.ocr_rx.is_some();
+                    let (label, icon) = match (busy, self.words.is_empty(), self.ocr_visible) {
+                        (true, _, _) => ("Распознавание…", Icon::Spinner),
+                        (_, true, _) => ("Распознать", Icon::Scan),
+                        (_, _, true) => ("Скрыть текст", Icon::Scan),
+                        _ => ("Показать текст", Icon::Scan),
+                    };
+                    let action = ui
+                        .add_enabled_ui(!busy, |ui| {
+                            kit::seg_button(ui, label, Some(icon), self.ocr_visible)
+                        })
+                        .inner;
+                    if action.clicked() {
+                        self.toggle_ocr();
+                    }
+                });
+            });
+        let actions = egui::Area::new("preview actions".into())
+            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16., -18.))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                kit::glass(ui).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.;
+                        if kit::icon_btn(ui, Icon::Copy, "Копировать (Ctrl+C)", Look::Plain, true)
+                            .clicked()
+                        {
+                            self.copy_image(true, ctx);
+                        }
+                        if kit::icon_btn(
+                            ui,
+                            Icon::Save,
+                            "Сохранить (Enter, Space или Ctrl+S)",
+                            Look::Accent,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.save(true, ctx);
+                        }
+                        if kit::icon_btn(
+                            ui,
+                            Icon::Delete,
+                            "Удалить снимок (Esc)",
+                            Look::Danger,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.show(Page::Hidden, ctx);
+                        }
+                    });
+                });
+            });
+        let mut bottom = actions.response.rect.top().min(ocr.response.rect.top());
+        if !self.notice.is_empty() {
+            let notice = egui::Area::new("preview notice".into())
+                .anchor(
+                    egui::Align2::CENTER_BOTTOM,
+                    Vec2::new(0., bottom - ctx.screen_rect().bottom() - 8.),
+                )
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.set_max_width(max_w);
+                    kit::toast(ui, &self.notice);
+                });
+            bottom = bottom.min(notice.response.rect.top());
+        }
         self.upload(ctx);
         egui::CentralPanel::default()
             .frame(
@@ -891,7 +983,12 @@ impl App {
                     return;
                 };
                 let dimensions = Vec2::new(image.width() as f32, image.height() as f32);
-                let viewport = ui.max_rect();
+                let mut viewport = ui.max_rect();
+                viewport.min.y = viewport.min.y.max(tools.response.rect.bottom() + 8.);
+                viewport.max.y = viewport.max.y.min(bottom - 8.);
+                if viewport.height() <= 0. {
+                    return;
+                }
                 let fit = (viewport.width() / dimensions.x)
                     .min(viewport.height() / dimensions.y)
                     .clamp(0.001, 1.0 / ctx.pixels_per_point());
@@ -954,42 +1051,19 @@ impl App {
                     .input(|i| i.pointer.press_origin())
                     .filter(|p| rect.contains(*p))
                     .map(map);
-                if response.secondary_clicked() {
-                    self.pending = None;
-                    self.drag = None;
-                }
-                if self.tool == Tool::Arrow {
-                    if let (Some(mark), Some(p)) = (&mut self.pending, point) {
-                        mark.update(p);
-                    }
-                    if response.clicked_by(primary)
-                        && response
-                            .interact_pointer_pos()
-                            .is_some_and(|p| rect.contains(p))
+                if self.tool != Tool::Cursor {
+                    if let Some(mark) =
+                        update_mark_drag(&response, press, point, &mut self.pending, |start| {
+                            Mark::new(self.tool, start, self.color, self.width)
+                        })
                     {
-                        if self.pending.is_some() {
-                            self.marks.push(self.pending.take().unwrap());
-                        } else if let Some(p) = point {
-                            self.pending = Some(Mark::new(self.tool, p, self.color, self.width));
-                        }
-                    }
-                } else if matches!(self.tool, Tool::Rectangle | Tool::Pen | Tool::Highlighter) {
-                    if response.drag_started_by(primary) {
-                        if let Some(p) = press {
-                            self.pending = Some(Mark::new(self.tool, p, self.color, self.width));
-                        }
-                    }
-                    if response.dragged_by(primary) || response.drag_stopped_by(primary) {
-                        if let (Some(mark), Some(p)) = (&mut self.pending, point) {
-                            mark.update(p);
-                        }
-                    }
-                    if response.drag_stopped_by(primary) {
-                        if let Some(mark) = self.pending.take() {
-                            self.marks.push(mark);
-                        }
+                        self.marks.push(mark);
+                        self.undone_marks.clear();
                     }
                 } else if self.ocr_visible {
+                    if response.secondary_clicked() {
+                        self.drag = None;
+                    }
                     self.select_text(ctx, &response, point, press, rect, origin, scale, &painter);
                 }
                 for mark in self.marks.iter().chain(self.pending.iter()) {
@@ -1015,10 +1089,32 @@ impl App {
             let mut open = true;
             egui::Window::new("Настройки · ThodShot")
                 .open(&mut open)
+                .order(egui::Order::Foreground)
                 .default_size([640., 462.])
                 .vscroll(true)
                 .show(ctx, |ui| self.settings_ui(ui, ctx));
             self.settings_open = open;
+        }
+    }
+
+    fn toggle_ocr(&mut self) {
+        if !self.words.is_empty() {
+            self.ocr_visible = !self.ocr_visible;
+            self.selected.clear();
+            self.notice = if self.ocr_visible {
+                self.tool = Tool::Cursor;
+                self.pending = None;
+                "Выделите текст мышью · Ctrl+C — копировать".into()
+            } else {
+                String::new()
+            };
+        } else if let Some(img) = self.image.clone() {
+            let language = self.settings.ocr_language.clone();
+            let (tx, rx) = mpsc::channel();
+            self.ocr_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(ocr::recognize(img, language));
+            });
         }
     }
 
@@ -1118,6 +1214,136 @@ impl App {
                 ui.close_menu();
             }
         });
+    }
+}
+
+fn update_mark_drag(
+    response: &egui::Response,
+    start: Option<Pos2>,
+    point: Option<Pos2>,
+    pending: &mut Option<Mark>,
+    begin: impl FnOnce(Pos2) -> Mark,
+) -> Option<Mark> {
+    let primary = egui::PointerButton::Primary;
+    let (cancel, pressed, released, held) = response.ctx.input(|i| {
+        (
+            i.pointer.secondary_pressed(),
+            i.pointer.primary_pressed(),
+            i.pointer.primary_released(),
+            i.pointer.primary_down(),
+        )
+    });
+    if cancel {
+        *pending = None;
+        return None;
+    }
+    if pressed
+        && response.is_pointer_button_down_on()
+        && let Some(start) = start
+    {
+        *pending = Some(begin(start));
+    }
+    if (held || released)
+        && let (Some(mark), Some(end)) = (pending.as_mut(), point)
+    {
+        mark.update(end);
+    }
+    if released {
+        return pending.take().filter(|mark| {
+            (mark.tool == Tool::Arrow || response.drag_stopped_by(primary)) && mark.is_complete()
+        });
+    }
+    if !held {
+        *pending = None;
+    }
+    None
+}
+
+fn take_preview_save_shortcut(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| {
+        i.modifiers.is_none()
+            && (i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                | i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+    })
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn arrow_drag_uses_press_and_release_positions_and_can_be_cancelled() {
+        let ctx = egui::Context::default();
+        let start = Pos2::new(40., 40.);
+        let middle = Pos2::new(70., 64.);
+        let end = Pos2::new(110., 100.);
+        let button = |pos, button, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let primary = egui::PointerButton::Primary;
+        let secondary = egui::PointerButton::Secondary;
+        let mut pending: Option<Mark> = None;
+        let mut frame = |events| {
+            let mut committed = None;
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let response = ui.allocate_rect(ui.max_rect(), Sense::click_and_drag());
+                        let origin = ctx.input(|i| i.pointer.press_origin());
+                        let point = response
+                            .interact_pointer_pos()
+                            .or_else(|| ctx.pointer_hover_pos());
+                        committed =
+                            update_mark_drag(&response, origin, point, &mut pending, |start| {
+                                Mark::new(Tool::Arrow, start, Color32::RED, 6.)
+                            });
+                    });
+                },
+            );
+            committed
+        };
+        frame(vec![egui::Event::PointerMoved(start)]);
+        assert!(frame(vec![button(start, primary, true)]).is_none());
+        assert!(frame(vec![egui::Event::PointerMoved(middle)]).is_none());
+        let arrow = frame(vec![button(end, primary, false)]).expect("arrow on release");
+        assert_eq!(arrow.points, [start, end]);
+
+        frame(vec![egui::Event::PointerMoved(start)]);
+        frame(vec![button(start, primary, true)]);
+        frame(vec![egui::Event::PointerMoved(middle)]);
+        assert!(frame(vec![button(middle, secondary, true)]).is_none());
+        frame(vec![button(middle, secondary, false)]);
+        frame(vec![egui::Event::PointerMoved(end)]);
+        assert!(frame(vec![button(end, primary, false)]).is_none());
+    }
+
+    #[test]
+    fn enter_and_space_are_consumed_even_with_widget_focus() {
+        for key in [egui::Key::Enter, egui::Key::Space] {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("tool")));
+                assert!(take_preview_save_shortcut(ctx));
+                assert!(!ctx.input(|i| i.key_pressed(key)));
+            });
+        }
     }
 }
 
@@ -1269,10 +1495,14 @@ impl eframe::App for App {
             self.show(Page::Hidden, ctx);
         }
         if self.page == Page::Preview && !self.settings_open {
-            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
-                if self.pending.take().is_none() {
-                    self.marks.pop();
-                }
+            if ctx.input(|i| {
+                i.modifiers.ctrl
+                    && (i.key_pressed(egui::Key::Y)
+                        || (i.modifiers.shift && i.key_pressed(egui::Key::Z)))
+            }) {
+                self.redo_mark();
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+                self.undo_mark();
             }
             if self.ocr_visible && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
                 self.selected.extend(0..self.words.len());
@@ -1287,11 +1517,7 @@ impl eframe::App for App {
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
                 self.save(false, ctx);
             }
-            if ctx.input(|i| {
-                i.modifiers.is_none()
-                    && (i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space))
-            }) && ctx.memory(|memory| memory.focused().is_none())
-            {
+            if take_preview_save_shortcut(ctx) {
                 self.save(true, ctx);
             }
         }
@@ -1300,7 +1526,7 @@ impl eframe::App for App {
             Page::Settings => {
                 self.header(ctx, "ThodShot   /   Настройки");
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
+                    .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill))
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             self.settings_ui(ui, ctx);

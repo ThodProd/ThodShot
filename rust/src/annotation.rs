@@ -35,7 +35,12 @@ impl Mark {
             self.points[1] = p;
         }
     }
-    fn arrow(&self) -> Option<[Pos2; 3]> {
+    pub fn is_complete(&self) -> bool {
+        self.tool != Tool::Arrow || self.arrow().is_some()
+    }
+
+    // Follow the outside edge of the shaft and head as a single silhouette.
+    fn arrow(&self) -> Option<[Pos2; 7]> {
         let a = self.points[0];
         let b = self.points[1];
         let d = b - a;
@@ -46,8 +51,18 @@ impl Mark {
         let u = d / len;
         let h = (self.width * 4.).max(14.).min(len * 0.62);
         let base = b - u * h;
-        let n = Vec2::new(-u.y, u.x) * h * 0.56;
-        Some([b, base + n, base - n])
+        let perpendicular = Vec2::new(-u.y, u.x);
+        let head = perpendicular * h * 0.56;
+        let shaft = perpendicular * (self.width * 0.5).min(h * 0.42);
+        Some([
+            a + shaft,
+            base + shaft,
+            base + head,
+            b,
+            base - head,
+            base - shaft,
+            a - shaft,
+        ])
     }
     pub fn paint(&self, painter: &egui::Painter, origin: Pos2, scale: f32) {
         let map = |p: Pos2| origin + p.to_vec2() * scale;
@@ -57,7 +72,23 @@ impl Mark {
             self.color
         };
         let stroke = Stroke::new(self.width * scale, color);
-        if self.tool == Tool::Rectangle {
+        if self.tool == Tool::Arrow {
+            if let Some([tail_l, shaft_l, head_l, tip, head_r, shaft_r, tail_r]) = self.arrow() {
+                // Put the shaft slightly inside the head so their antialiased edges cannot split.
+                let overlap = (tip - (head_l + (head_r - head_l) / 2.)) * 0.06;
+                for part in [
+                    vec![
+                        map(tail_l),
+                        map(shaft_l + overlap),
+                        map(shaft_r + overlap),
+                        map(tail_r),
+                    ],
+                    vec![map(head_l), map(tip), map(head_r)],
+                ] {
+                    painter.add(egui::Shape::convex_polygon(part, color, Stroke::NONE));
+                }
+            }
+        } else if self.tool == Tool::Rectangle {
             painter.rect_stroke(
                 Rect::from_two_pos(map(self.points[0]), map(self.points[1])),
                 0.,
@@ -69,15 +100,6 @@ impl Mark {
                 self.points.iter().copied().map(map).collect(),
                 stroke,
             ));
-            if self.tool == Tool::Arrow {
-                if let Some(p) = self.arrow() {
-                    painter.add(egui::Shape::convex_polygon(
-                        p.into_iter().map(map).collect(),
-                        color,
-                        Stroke::NONE,
-                    ));
-                }
-            }
         }
     }
     fn path(&self) -> Option<tiny_skia::Path> {
@@ -114,7 +136,25 @@ pub fn render(source: &RgbaImage, marks: &[Mark]) -> RgbaImage {
             },
         );
         paint.anti_alias = true;
-        if let Some(path) = mark.path() {
+        if mark.tool == Tool::Arrow {
+            if let Some(points) = mark.arrow() {
+                let mut outline = tiny_skia::PathBuilder::new();
+                outline.move_to(points[0].x, points[0].y);
+                for point in &points[1..] {
+                    outline.line_to(point.x, point.y);
+                }
+                outline.close();
+                if let Some(path) = outline.finish() {
+                    layer.fill_path(
+                        &path,
+                        &paint,
+                        tiny_skia::FillRule::Winding,
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
+            }
+        } else if let Some(path) = mark.path() {
             layer.stroke_path(
                 &path,
                 &paint,
@@ -131,24 +171,6 @@ pub fn render(source: &RgbaImage, marks: &[Mark]) -> RgbaImage {
                 tiny_skia::Transform::identity(),
                 None,
             );
-        }
-        if mark.tool == Tool::Arrow {
-            if let Some(points) = mark.arrow() {
-                let mut p = tiny_skia::PathBuilder::new();
-                p.move_to(points[0].x, points[0].y);
-                p.line_to(points[1].x, points[1].y);
-                p.line_to(points[2].x, points[2].y);
-                p.close();
-                if let Some(path) = p.finish() {
-                    layer.fill_path(
-                        &path,
-                        &paint,
-                        tiny_skia::FillRule::Winding,
-                        tiny_skia::Transform::identity(),
-                        None,
-                    );
-                }
-            }
         }
     }
     let mut output = source.clone();
@@ -172,5 +194,21 @@ mod tests {
         let output = render(&src, &[mark]);
         assert_eq!(output.get_pixel(40, 43).0, [255, 0, 0, 255]);
         assert_eq!(output.get_pixel(40, 50).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn thick_arrow_ends_at_the_release_point() {
+        let source = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+        let start = Pos2::new(16., 32.);
+        let end = Pos2::new(32., 32.);
+        let mut mark = Mark::new(Tool::Arrow, start, Color32::RED, 20.);
+        assert!(!mark.is_complete());
+        mark.update(end);
+        let shape = mark.arrow().unwrap();
+        assert_eq!(shape[3], end);
+        assert_eq!((shape[0].x, shape[6].x), (start.x, start.x));
+        let saved = render(&source, &[mark]);
+        assert_eq!(saved.get_pixel(24, 32).0, [255, 0, 0, 255]);
+        assert_eq!(saved.get_pixel(32, 32).0, [255, 255, 255, 255]);
     }
 }
