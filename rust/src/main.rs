@@ -10,10 +10,17 @@ mod ocr;
 mod settings;
 mod settings_view;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use integration::Integration;
 use settings::{AppSettings, Paths};
-use std::process::Stdio;
+use std::os::windows::ffi::OsStrExt;
+use windows::{
+    Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW},
+    },
+    core::{PCWSTR, PWSTR},
+};
 
 fn main() {
     let result = Paths::initialize().and_then(|paths| {
@@ -78,14 +85,46 @@ fn apply_integrations(paths: &Paths, mut settings: AppSettings) -> Result<()> {
     if ipc::is_running()? {
         ipc::signal(ipc::RELOAD_EVENT)?;
     } else if settings.intercept_print_screen {
-        // ThodHUB stops the previous resident before installing the update.
-        // Its installer waits for both output pipes to close after this command exits.
-        std::process::Command::new(std::env::current_exe()?)
-            .arg("--background")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        start_background()?;
+    }
+    Ok(())
+}
+
+fn start_background() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let path: Vec<u16> = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut command: Vec<u16> = "\""
+        .encode_utf16()
+        .chain(executable.as_os_str().encode_wide())
+        .chain("\" --background".encode_utf16())
+        .chain(Some(0))
+        .collect();
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // ThodHUB waits for EOF on its installer pipes. The resident must inherit none of its handles.
+    unsafe {
+        CreateProcessW(
+            PCWSTR(path.as_ptr()),
+            Some(PWSTR(command.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &startup,
+            &mut process,
+        )
+        .context("Не удалось запустить ThodShot в фоне")?;
+        let _ = CloseHandle(process.hThread);
+        let _ = CloseHandle(process.hProcess);
     }
     Ok(())
 }
