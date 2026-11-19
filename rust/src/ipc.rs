@@ -1,5 +1,10 @@
 use anyhow::{Context, Result};
 use std::{
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -10,8 +15,8 @@ use windows::{
             WAIT_OBJECT_0,
         },
         System::Threading::{
-            CreateEventW, CreateMutexW, MUTEX_MODIFY_STATE, OpenMutexW,
-            SYNCHRONIZATION_ACCESS_RIGHTS, SetEvent, WaitForSingleObject,
+            CreateEventW, CreateMutexW, INFINITE, MUTEX_MODIFY_STATE, OpenMutexW,
+            SYNCHRONIZATION_ACCESS_RIGHTS, SetEvent, WaitForMultipleObjects,
         },
     },
     core::PCWSTR,
@@ -63,7 +68,7 @@ pub fn stop_running(timeout_ms: u64) -> Result<bool> {
     }
     let request = Listener::open(EXIT_EVENT)?;
     unsafe {
-        SetEvent(request.0)?;
+        SetEvent(request.handle())?;
     }
     wait_for_exit(timeout_ms)
 }
@@ -105,23 +110,96 @@ pub fn listeners() -> Result<[Listener; 4]> {
     ])
 }
 
-pub struct Listener(HANDLE);
+pub struct Listener(OwnedHandle);
 
 impl Listener {
     pub fn open(name: &str) -> Result<Self> {
         let name_wide = wide(name);
-        let handle = unsafe { CreateEventW(None, false, false, PCWSTR(name_wide.as_ptr())) }
+        let name_ptr = if name.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(name_wide.as_ptr())
+        };
+        let handle = unsafe { CreateEventW(None, false, false, name_ptr) }
             .with_context(|| format!("could not create IPC event {name}"))?;
-        Ok(Self(handle))
+        // CreateEventW returned an owned, process-wide kernel handle.
+        Ok(Self(unsafe { OwnedHandle::from_raw_handle(handle.0) }))
     }
 
-    pub fn is_signaled(&self) -> bool {
-        unsafe { WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 }
+    fn handle(&self) -> HANDLE {
+        HANDLE(self.0.as_raw_handle())
     }
 }
 
-impl Drop for Listener {
+pub struct Watcher {
+    pending: Arc<AtomicU8>,
+    stop: Listener,
+}
+
+impl Watcher {
+    pub fn new(events: [Listener; 4], wake: impl Fn() + Send + 'static) -> Result<Self> {
+        let stop = Listener::open("")?;
+        let thread_stop = Listener(stop.0.try_clone()?);
+        let pending = Arc::new(AtomicU8::new(0));
+        let thread_pending = pending.clone();
+        thread::Builder::new()
+            .name("ThodShot IPC".into())
+            .spawn(move || {
+                let [capture, settings, reload, exit] = events.each_ref().map(Listener::handle);
+                let handles = [capture, settings, reload, exit, thread_stop.handle()];
+                loop {
+                    let event = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+                    let index = event.0.wrapping_sub(WAIT_OBJECT_0.0);
+                    if index >= events.len() as u32 {
+                        break;
+                    }
+                    thread_pending.fetch_or(1 << index, Ordering::Release);
+                    wake();
+                }
+            })?;
+        Ok(Self { pending, stop })
+    }
+
+    pub fn take(&self) -> [bool; 4] {
+        let pending = self.pending.swap(0, Ordering::AcqRel);
+        std::array::from_fn(|i| pending & (1 << i) != 0)
+    }
+}
+
+impl Drop for Watcher {
     fn drop(&mut self) {
-        close(self.0);
+        let _ = unsafe { SetEvent(self.stop.handle()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_event_wakes_the_resident_once() {
+        let capture = Listener::open("").unwrap();
+        let sender = Listener(capture.0.try_clone().unwrap());
+        let (wake, notification) = std::sync::mpsc::channel();
+        let watcher = Watcher::new(
+            [
+                capture,
+                Listener::open("").unwrap(),
+                Listener::open("").unwrap(),
+                Listener::open("").unwrap(),
+            ],
+            move || {
+                let _ = wake.send(());
+            },
+        )
+        .unwrap();
+        for _ in 0..3 {
+            unsafe {
+                SetEvent(sender.handle()).unwrap();
+            }
+            notification.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(watcher.take(), [true, false, false, false]);
+            assert_eq!(watcher.take(), [false; 4]);
+        }
     }
 }

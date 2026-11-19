@@ -1,6 +1,6 @@
 use crate::{
     annotation::{self, Mark, Tool},
-    capture::{self, Capture},
+    capture::{Capture, CaptureWorker},
     hook::Hook,
     integration::Integration,
     ipc, ocr,
@@ -21,9 +21,16 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::{
-    Foundation::{HWND, POINT},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
-    UI::WindowsAndMessaging::{GetCursorPos, HWND_TOPMOST, SWP_SHOWWINDOW, SetWindowPos},
+    UI::{
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        WindowsAndMessaging::{
+            GetCursorPos, GetForegroundWindow, HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_CROSS,
+            LoadCursorW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowPos,
+            WM_NCDESTROY, WM_SETCURSOR, WindowFromPoint,
+        },
+    },
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -35,6 +42,7 @@ enum Page {
 }
 pub fn run(paths: Paths, command: String, events: [ipc::Listener; 4]) -> Result<()> {
     let settings = AppSettings::load(&paths)?;
+    let capture_worker = CaptureWorker::new()?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ThodShot")
@@ -50,7 +58,16 @@ pub fn run(paths: Paths, command: String, events: [ipc::Listener; 4]) -> Result<
     eframe::run_native(
         "ThodShot",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, paths, settings, command, events)?))),
+        Box::new(move |cc| {
+            Ok(Box::new(App::new(
+                cc,
+                paths,
+                settings,
+                command,
+                events,
+                capture_worker,
+            )?))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -101,19 +118,69 @@ fn monitor_at_cursor(capture: &Capture) -> Rect {
         })
         .expect("capture has at least one monitor")
 }
+
+struct OverlayCursor {
+    window: HWND,
+    cursor: HCURSOR,
+}
+
+impl OverlayCursor {
+    fn install(window: HWND) -> Result<Self> {
+        let cursor = unsafe { LoadCursorW(None, IDC_CROSS)? };
+        let installed =
+            unsafe { SetWindowSubclass(window, Some(overlay_cursor_proc), 0, cursor.0 as usize) };
+        anyhow::ensure!(installed.as_bool(), "Не удалось установить курсор выбора");
+        Ok(Self { window, cursor })
+    }
+
+    fn refresh(&self) {
+        let mut point = POINT::default();
+        unsafe {
+            if GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.window {
+                let _ = SetCursor(Some(self.cursor));
+            }
+        }
+    }
+}
+
+impl Drop for OverlayCursor {
+    fn drop(&mut self) {
+        let _ = unsafe { RemoveWindowSubclass(self.window, Some(overlay_cursor_proc), 0) };
+    }
+}
+
+unsafe extern "system" fn overlay_cursor_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    cursor: usize,
+) -> LRESULT {
+    if message == WM_SETCURSOR && lparam.0 as u16 == HTCLIENT as u16 {
+        let _ = unsafe { SetCursor(Some(HCURSOR(cursor as _))) };
+        return LRESULT(1);
+    }
+    if message == WM_NCDESTROY {
+        let _ = unsafe { RemoveWindowSubclass(window, Some(overlay_cursor_proc), id) };
+    }
+    unsafe { DefSubclassProc(window, message, wparam, lparam) }
+}
+
 struct App {
     window: HWND,
     paths: Paths,
     settings: AppSettings,
     page: Page,
     hook: Hook,
-    events: [ipc::Listener; 4],
+    events: ipc::Watcher,
     tray: tray_icon::TrayIcon,
     tray_capture: tray_icon::menu::MenuId,
     tray_settings: tray_icon::menu::MenuId,
     tray_exit: tray_icon::menu::MenuId,
+    capture_worker: CaptureWorker,
     capture_rx: Option<Receiver<Result<Capture>>>,
-    capture_due: Option<Instant>,
+    capture_after_hide: bool,
     capture: Option<Capture>,
     image: Option<RgbaImage>,
     texture: Option<egui::TextureHandle>,
@@ -127,6 +194,8 @@ struct App {
     drag: Option<Pos2>,
     toolbar_monitor: Rect,
     overlay_opened: Instant,
+    overlay_was_foreground: bool,
+    overlay_cursor: Option<OverlayCursor>,
     full: bool,
     zoom: f32,
     pan: Vec2,
@@ -148,9 +217,10 @@ impl App {
         settings: AppSettings,
         command: String,
         events: [ipc::Listener; 4],
+        capture_worker: CaptureWorker,
     ) -> Result<Self> {
         configure_fonts(&cc.egui_ctx);
-        let hook = Hook::new()?;
+        let hook = Hook::new(cc.egui_ctx.clone())?;
         hook.enable(settings.intercept_print_screen);
         let menu = tray_icon::menu::Menu::new();
         let capture = tray_icon::menu::MenuItem::new("Сделать снимок", true, None);
@@ -173,6 +243,8 @@ impl App {
         let RawWindowHandle::Win32(handle) = cc.window_handle()?.as_raw() else {
             anyhow::bail!("Ожидалось окно Win32");
         };
+        let repaint = cc.egui_ctx.clone();
+        let events = ipc::Watcher::new(events, move || repaint.request_repaint())?;
         let mut app = Self {
             window: HWND(handle.hwnd.get() as _),
             paths,
@@ -184,8 +256,9 @@ impl App {
             tray_capture: capture.id().clone(),
             tray_settings: prefs.id().clone(),
             tray_exit: exit.id().clone(),
+            capture_worker,
             capture_rx: None,
-            capture_due: None,
+            capture_after_hide: false,
             capture: None,
             image: None,
             texture: None,
@@ -199,6 +272,8 @@ impl App {
             drag: None,
             toolbar_monitor: Rect::NOTHING,
             overlay_opened: Instant::now(),
+            overlay_was_foreground: false,
+            overlay_cursor: None,
             full: false,
             zoom: 1.,
             pan: Vec2::ZERO,
@@ -295,6 +370,9 @@ impl App {
     }
     fn show(&mut self, page: Page, ctx: &egui::Context) {
         self.page = page;
+        if page != Page::Overlay {
+            self.overlay_cursor = None;
+        }
         if page == Page::Hidden {
             // The root viewport must stay mapped for eframe to handle repaint and IPC.
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
@@ -367,12 +445,35 @@ impl App {
         }
     }
     fn start_capture(&mut self, ctx: &egui::Context) {
-        if self.page == Page::Overlay || self.capture_rx.is_some() || self.capture_due.is_some() {
+        if self.page == Page::Overlay || self.capture_rx.is_some() || self.capture_after_hide {
             return;
         }
-        self.show(Page::Hidden, ctx);
-        self.capture_due = Some(Instant::now() + Duration::from_millis(160));
         self.notice.clear();
+        if self.page == Page::Hidden {
+            self.request_capture(ctx, false);
+        } else {
+            self.show(Page::Hidden, ctx);
+            // The viewport commands move the preview off screen at the end of this frame.
+            self.capture_after_hide = true;
+            ctx.request_repaint();
+        }
+    }
+
+    fn request_capture(&mut self, ctx: &egui::Context, flush_desktop: bool) {
+        let repaint = ctx.clone();
+        match self
+            .capture_worker
+            .request(flush_desktop, move || repaint.request_repaint())
+        {
+            Ok(receiver) => self.capture_rx = Some(receiver),
+            Err(error) => self.capture_error(ctx, error),
+        }
+    }
+
+    fn capture_error(&mut self, ctx: &egui::Context, error: anyhow::Error) {
+        self.paths.log(&format!("Захват экрана: {error:#}"));
+        self.notice = format!("Не удалось сделать снимок: {error}");
+        self.show(Page::Settings, ctx);
     }
     fn accept_capture(&mut self, capture: Capture, ctx: &egui::Context) {
         self.texture = None;
@@ -390,6 +491,11 @@ impl App {
         self.full = self.settings.default_mode == "full";
         self.toolbar_monitor = monitor_at_cursor(&capture);
         self.overlay_opened = Instant::now();
+        self.overlay_was_foreground = false;
+        match OverlayCursor::install(self.window) {
+            Ok(cursor) => self.overlay_cursor = Some(cursor),
+            Err(error) => self.paths.log(&format!("Курсор захвата: {error:#}")),
+        }
         if let Err(error) = unsafe {
             SetWindowPos(
                 self.window,
@@ -405,6 +511,15 @@ impl App {
             self.show(Page::Settings, ctx);
             return;
         }
+        unsafe {
+            self.overlay_was_foreground =
+                SetForegroundWindow(self.window).as_bool() || GetForegroundWindow() == self.window;
+        }
+        // A stationary pointer may not receive a WM_SETCURSOR when the overlay opens.
+        if let Some(cursor) = &self.overlay_cursor {
+            cursor.refresh();
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title("Съёмка · ThodShot".into()));
         self.capture = Some(capture);
@@ -674,6 +789,7 @@ impl App {
         }
     }
     fn overlay(&mut self, ctx: &egui::Context) {
+        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
         self.upload(ctx);
         let Some(c) = &self.capture else {
             return;
@@ -1380,20 +1496,20 @@ fn write_image(image: &RgbaImage, path: &std::path::Path) -> Result<()> {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        let interval =
-            if self.page == Page::Hidden && self.capture_due.is_none() && self.capture_rx.is_none()
-            {
-                75
-            } else {
-                30
-            };
+        let interval = if self.page == Page::Hidden { 75 } else { 30 };
         ctx.request_repaint_after(Duration::from_millis(interval));
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.show(Page::Hidden, ctx);
         }
-        let mut capture = self.hook.take() | self.events[0].is_signaled();
-        let mut settings = self.events[1].is_signaled();
+        let [
+            capture_requested,
+            settings_requested,
+            reload_requested,
+            exit_requested,
+        ] = self.events.take();
+        let mut capture = self.hook.take() | capture_requested;
+        let mut settings = settings_requested;
         while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if event.id == self.tray_capture {
                 capture = true;
@@ -1417,7 +1533,7 @@ impl eframe::App for App {
                 capture = true;
             }
         }
-        if self.events[2].is_signaled() {
+        if reload_requested {
             if let Ok(s) = AppSettings::load(&self.paths) {
                 self.settings = s;
                 self.hook.enable(self.settings.intercept_print_screen);
@@ -1425,10 +1541,13 @@ impl eframe::App for App {
                 self.theme(ctx);
             }
         }
-        if self.events[3].is_signaled() || self.quitting {
+        if exit_requested || self.quitting {
             self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
+        }
+        if std::mem::take(&mut self.capture_after_hide) {
+            self.request_capture(ctx, true);
         }
         if capture {
             self.start_capture(ctx);
@@ -1436,7 +1555,7 @@ impl eframe::App for App {
         if settings
             && self.page != Page::Overlay
             && self.capture_rx.is_none()
-            && self.capture_due.is_none()
+            && !self.capture_after_hide
         {
             if self.page == Page::Preview {
                 self.settings_open = true;
@@ -1444,25 +1563,23 @@ impl eframe::App for App {
                 self.show(Page::Settings, ctx);
             }
         }
-        if self.capture_due.is_some_and(|at| Instant::now() >= at) {
-            self.capture_due = None;
-            let (tx, rx) = mpsc::channel();
-            self.capture_rx = Some(rx);
-            std::thread::spawn(move || {
-                let _ = tx.send(capture::capture());
-            });
-        }
         if let Some(rx) = &self.capture_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.capture_rx = None;
-                match result {
-                    Ok(c) => self.accept_capture(c, ctx),
-                    Err(e) => {
-                        self.paths.log(&format!("Захват экрана: {e:#}"));
-                        self.notice = format!("Не удалось сделать снимок: {e}");
-                        self.show(Page::Settings, ctx);
-                    }
+            match rx.try_recv() {
+                Ok(Ok(capture)) => {
+                    self.capture_rx = None;
+                    self.accept_capture(capture, ctx);
+                    ctx.request_repaint();
+                    return;
                 }
+                Ok(Err(error)) => {
+                    self.capture_rx = None;
+                    self.capture_error(ctx, error);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.capture_rx = None;
+                    self.capture_error(ctx, anyhow::anyhow!("Поток захвата остановился"));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
         if let Some(rx) = &self.ocr_rx {
@@ -1486,12 +1603,20 @@ impl eframe::App for App {
             }
         }
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        let overlay_blurred = self.page == Page::Overlay
-            && self.overlay_opened.elapsed() > Duration::from_millis(700)
-            && !ctx.input(|i| i.focused);
+        let overlay_blurred = if self.page == Page::Overlay {
+            let foreground = unsafe { GetForegroundWindow() } == self.window;
+            self.overlay_was_foreground |= foreground;
+            self.overlay_was_foreground
+                && !foreground
+                && self.overlay_opened.elapsed() > Duration::from_millis(700)
+        } else {
+            false
+        };
         if escape && self.settings_open {
             self.settings_open = false;
         } else if escape || overlay_blurred {
+            self.capture_after_hide = false;
+            self.capture_rx = None;
             self.show(Page::Hidden, ctx);
         }
         if self.page == Page::Preview && !self.settings_open {

@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use image::RgbaImage;
+use std::{
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::{Duration, Instant},
+};
 use windows::{
     Graphics::{
-        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem},
+        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
         Imaging::SoftwareBitmap,
         SizeInt32,
@@ -16,6 +21,7 @@ use windows::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
                 ID3D11Device,
             },
+            Dwm::DwmFlush,
             Dxgi::IDXGIDevice,
             Gdi::{
                 BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
@@ -31,6 +37,7 @@ use windows::{
     },
     core::{BOOL, Interface},
 };
+use windows_future::AsyncStatus;
 
 pub struct Capture {
     pub image: RgbaImage,
@@ -38,34 +45,93 @@ pub struct Capture {
     pub monitors: Vec<[i32; 4]>,
 }
 
-pub fn capture() -> Result<Capture> {
+struct CaptureRequest {
+    flush_desktop: bool,
+    result: Sender<Result<Capture>>,
+    wake: Box<dyn FnOnce() + Send>,
+}
+
+pub struct CaptureWorker(Sender<CaptureRequest>);
+
+impl CaptureWorker {
+    pub fn new() -> Result<Self> {
+        let (requests, queue) = mpsc::channel::<CaptureRequest>();
+        thread::Builder::new()
+            .name("ThodShot capture".into())
+            .spawn(move || {
+                let apartment = Apartment::initialize();
+                let device = apartment.0.then(device).and_then(Result::ok);
+                while let Ok(request) = queue.recv() {
+                    if request.flush_desktop {
+                        let _ = unsafe { DwmFlush() };
+                    }
+                    let _ = request.result.send(capture(device.as_ref()));
+                    (request.wake)();
+                }
+            })?;
+        Ok(Self(requests))
+    }
+
+    pub fn request(
+        &self,
+        flush_desktop: bool,
+        wake: impl FnOnce() + Send + 'static,
+    ) -> Result<Receiver<Result<Capture>>> {
+        let (result, receiver) = mpsc::channel();
+        self.0
+            .send(CaptureRequest {
+                flush_desktop,
+                result,
+                wake: Box::new(wake),
+            })
+            .map_err(|_| anyhow::anyhow!("Поток захвата остановился"))?;
+        Ok(receiver)
+    }
+}
+
+struct Apartment(bool);
+
+impl Apartment {
+    fn initialize() -> Self {
+        Self(unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok())
+    }
+}
+
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                RoUninitialize();
+            }
+        }
+    }
+}
+
+const FRAME_BUDGET: Duration = Duration::from_millis(90);
+
+fn capture(device: Option<&IDirect3DDevice>) -> Result<Capture> {
     let screens = monitors()?;
     anyhow::ensure!(!screens.is_empty(), "Нет доступных мониторов");
     let left = screens.iter().map(|(_, r)| r.left).min().unwrap();
     let top = screens.iter().map(|(_, r)| r.top).min().unwrap();
     let right = screens.iter().map(|(_, r)| r.right).max().unwrap();
     let bottom = screens.iter().map(|(_, r)| r.bottom).max().unwrap();
-    let mut image = RgbaImage::new((right - left) as u32, (bottom - top) as u32);
-    let apartment = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
-    struct Apartment(bool);
-    impl Drop for Apartment {
-        fn drop(&mut self) {
-            if self.0 {
-                unsafe {
-                    RoUninitialize();
-                }
-            }
-        }
-    }
-    let _apartment = Apartment(apartment);
-    let device = device().ok();
+    let mut image =
+        (screens.len() > 1).then(|| RgbaImage::new((right - left) as u32, (bottom - top) as u32));
+    // Start the frame pools together so a slow display cannot delay every other monitor.
+    let sessions: Vec<_> = screens
+        .iter()
+        .map(|&(monitor, bounds)| {
+            device.and_then(|device| WgcSession::start(device, monitor, bounds).ok())
+        })
+        .collect();
+    let deadline = Instant::now() + FRAME_BUDGET;
     let mut monitors = Vec::new();
-    for (monitor, bounds) in screens {
+    for ((_, bounds), session) in screens.into_iter().zip(sessions) {
         let width = (bounds.right - bounds.left) as u32;
         let height = (bounds.bottom - bounds.top) as u32;
-        let shot = device
-            .as_ref()
-            .and_then(|device| wgc(device, monitor, width, height).ok())
+        let shot = session
+            .and_then(|session| session.frame(deadline).ok())
             .filter(|shot| {
                 if shot.dimensions() != (width, height) {
                     return false;
@@ -88,11 +154,15 @@ pub fn capture() -> Result<Capture> {
             None => gdi(bounds)?,
         };
         let (x, y) = (bounds.left - left, bounds.top - top);
-        image::imageops::replace(&mut image, &shot, i64::from(x), i64::from(y));
+        if let Some(canvas) = &mut image {
+            image::imageops::replace(canvas, &shot, i64::from(x), i64::from(y));
+        } else {
+            image = Some(shot);
+        }
         monitors.push([x, y, width as i32, height as i32]);
     }
     Ok(Capture {
-        image,
+        image: image.context("Нет кадра захвата")?,
         origin: [left, top],
         monitors,
     })
@@ -148,7 +218,7 @@ fn gdi(bounds: RECT) -> Result<RgbaImage> {
             anyhow::ensure!(!bitmap.is_invalid(), "CreateCompatibleBitmap");
             let previous = SelectObject(target, HGDIOBJ(bitmap.0));
             let result = if previous.is_invalid() {
-                anyhow::bail!("SelectObject")
+                Err(anyhow::anyhow!("SelectObject"))
             } else {
                 let copied = BitBlt(
                     target,
@@ -211,48 +281,74 @@ fn device() -> Result<IDirect3DDevice> {
     Ok(unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?)
 }
 
-fn wgc(device: &IDirect3DDevice, monitor: HMONITOR, w: u32, h: u32) -> Result<RgbaImage> {
-    let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-    let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor)? };
-    let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-        device,
-        DirectXPixelFormat::B8G8R8A8UIntNormalized,
-        2,
-        SizeInt32 {
-            Width: w as i32,
-            Height: h as i32,
-        },
-    )?;
-    let session = pool.CreateCaptureSession(&item)?;
-    let result = (|| -> Result<RgbaImage> {
-        let _ = session.SetIsCursorCaptureEnabled(false);
-        session.StartCapture()?;
-        let start = std::time::Instant::now();
-        loop {
-            if let Ok(frame) = pool.TryGetNextFrame() {
-                let bitmap =
-                    SoftwareBitmap::CreateCopyFromSurfaceAsync(&frame.Surface()?)?.join()?;
-                let width = bitmap.PixelWidth()? as u32;
-                let height = bitmap.PixelHeight()? as u32;
-                let buffer = Buffer::Create(width * height * 4)?;
-                bitmap.CopyToBuffer(&buffer)?;
-                let mut bytes = vec![0; (width * height * 4) as usize];
-                DataReader::FromBuffer(&buffer)?.ReadBytes(&mut bytes)?;
-                for p in bytes.chunks_exact_mut(4) {
-                    p.swap(0, 2);
-                    p[3] = 255;
-                }
-                bitmap.Close()?;
-                frame.Close()?;
-                return RgbaImage::from_raw(width, height, bytes).context("WGC frame size");
+struct WgcSession {
+    pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
+}
+
+impl WgcSession {
+    fn start(device: &IDirect3DDevice, monitor: HMONITOR, bounds: RECT) -> Result<Self> {
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor)? };
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            device,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            2,
+            SizeInt32 {
+                Width: bounds.right - bounds.left,
+                Height: bounds.bottom - bounds.top,
+            },
+        )?;
+        let session = pool.CreateCaptureSession(&item)?;
+        let capture = Self { pool, session };
+        let _ = capture.session.SetIsCursorCaptureEnabled(false);
+        capture.session.StartCapture()?;
+        Ok(capture)
+    }
+
+    fn frame(&self, deadline: Instant) -> Result<RgbaImage> {
+        let frame = loop {
+            if let Ok(frame) = self.pool.TryGetNextFrame() {
+                break frame;
             }
-            anyhow::ensure!(start.elapsed().as_millis() < 1500, "WGC timeout");
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            wait_for_frame(deadline)?;
+        };
+        let readback = SoftwareBitmap::CreateCopyFromSurfaceAsync(&frame.Surface()?)?;
+        while readback.Status()? == AsyncStatus::Started {
+            if let Err(error) = wait_for_frame(deadline) {
+                let _ = readback.Cancel();
+                return Err(error);
+            }
         }
-    })();
-    let _ = session.Close();
-    let _ = pool.Close();
-    result
+        let bitmap = readback.GetResults()?;
+        let width = bitmap.PixelWidth()? as u32;
+        let height = bitmap.PixelHeight()? as u32;
+        let buffer = Buffer::Create(width * height * 4)?;
+        bitmap.CopyToBuffer(&buffer)?;
+        let mut bytes = vec![0; (width * height * 4) as usize];
+        DataReader::FromBuffer(&buffer)?.ReadBytes(&mut bytes)?;
+        for pixel in bytes.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        bitmap.Close()?;
+        frame.Close()?;
+        RgbaImage::from_raw(width, height, bytes).context("WGC frame size")
+    }
+}
+
+impl Drop for WgcSession {
+    fn drop(&mut self) {
+        let _ = self.session.Close();
+        let _ = self.pool.Close();
+    }
+}
+
+fn wait_for_frame(deadline: Instant) -> Result<()> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    anyhow::ensure!(!left.is_zero(), "WGC timeout");
+    thread::sleep(left.min(Duration::from_millis(2)));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -260,9 +356,19 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows desktop"]
     fn desktop_capture() {
-        let capture = super::capture().unwrap();
-        assert!(capture.image.width() > 0 && capture.image.height() > 0);
-        assert!(!capture.monitors.is_empty());
+        let worker = super::CaptureWorker::new().unwrap();
+        for attempt in 1..=4 {
+            let start = std::time::Instant::now();
+            let capture = worker
+                .request(false, || {})
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+                .unwrap();
+            eprintln!("capture {attempt}: {:?}", start.elapsed());
+            assert!(capture.image.width() > 0 && capture.image.height() > 0);
+            assert!(!capture.monitors.is_empty());
+        }
     }
 
     #[test]
