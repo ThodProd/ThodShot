@@ -668,7 +668,7 @@ impl App {
             }
         }
         match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-            Ok(()) => {}
+            Ok(()) => self.notice = "Текст скопирован".into(),
             Err(e) => self.notice = e.to_string(),
         }
     }
@@ -1406,9 +1406,35 @@ fn take_preview_save_shortcut(ctx: &egui::Context) -> bool {
     })
 }
 
+fn take_preview_copy_request(ctx: &egui::Context) -> bool {
+    // egui-winit sends Copy instead of a Key event for Ctrl+C.
+    ctx.input_mut(|input| {
+        let count = input.events.len();
+        input
+            .events
+            .retain(|event| !matches!(event, egui::Event::Copy));
+        input.events.len() != count
+    })
+}
+
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+
+    #[test]
+    fn preview_consumes_the_platform_copy_event() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Copy],
+                ..Default::default()
+            },
+            |ctx| {
+                assert!(take_preview_copy_request(ctx));
+                assert!(!take_preview_copy_request(ctx));
+            },
+        );
+    }
 
     #[test]
     fn arrow_drag_uses_press_and_release_positions_and_can_be_cancelled() {
@@ -1666,11 +1692,11 @@ impl eframe::App for App {
             if self.ocr_visible && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
                 self.selected.extend(0..self.words.len());
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) {
-                if self.selected.is_empty() {
-                    self.copy_image(false, ctx);
-                } else {
+            if take_preview_copy_request(ctx) {
+                if self.ocr_visible && !self.selected.is_empty() {
                     self.copy_text();
+                } else {
+                    self.copy_image(false, ctx);
                 }
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
